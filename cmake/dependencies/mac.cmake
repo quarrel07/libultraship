@@ -1,5 +1,18 @@
 include(FetchContent)
 
+# macOS: a stale/partial /Library/Frameworks/SDL2.framework can win find_package(SDL2)
+# over Homebrew's and break the build (SDL2_INCLUDE_DIR -> missing /Library/Headers).
+# Search frameworks last and make sure the Homebrew prefix is on CMAKE_PREFIX_PATH.
+set(CMAKE_FIND_FRAMEWORK LAST)
+find_program(BREW_EXECUTABLE brew)
+if (BREW_EXECUTABLE)
+    execute_process(COMMAND ${BREW_EXECUTABLE} --prefix
+                    OUTPUT_VARIABLE BREW_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if (BREW_PREFIX)
+        list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}")
+    endif()
+endif()
+
 #=================== spdlog ===================
 # macports has issues with this because of fmt
 # brew doesn't support building multiarch
