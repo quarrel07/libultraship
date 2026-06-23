@@ -1,5 +1,6 @@
 #include "fast/Fast3dGui.h"
 
+#include <algorithm>
 #include "fast/Fast3dWindow.h"
 #include "ship/Context.h"
 #include "ship/config/ConsoleVariable.h"
@@ -47,6 +48,28 @@ Fast3dGui::Fast3dGui(std::vector<std::shared_ptr<Ship::GuiWindow>> guiWindows) :
 
 void Fast3dGui::Init(GuiWindowInitData windowImpl) {
     mImpl = windowImpl;
+
+    // Detect the display backing scale (physical pixels per logical point) from the SDL window so the
+    // base Gui::Init() can rasterize ImGui fonts at native density (sharp text on HiDPI/Retina). Only
+    // the SDL backends expose an SDL_Window here; leave it 1.0 (the default) for DX11/others.
+    auto backend = Ship::Context::GetRawInstance()->GetWindow()->GetWindowBackend();
+    if (backend == WindowBackend::FAST3D_SDL_OPENGL || backend == WindowBackend::FAST3D_SDL_METAL) {
+        // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
+        auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+        if (sdlWindow != nullptr) {
+            int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+            SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+            SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
+#else
+            SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
+#endif
+            if (logicalW > 0 && pixelW > 0) {
+                mDpiScale = std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
+            }
+        }
+    }
+
     Gui::Init();
 }
 
