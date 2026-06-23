@@ -135,6 +135,15 @@ class Gui {
     std::shared_ptr<GuiWindow> GetMenu();
 
     /**
+     * @brief Display backing scale (physical pixels per logical point) used for HiDPI font
+     * rasterization. 1.0 standard-DPI, ~2.0 typical Retina, fractional on scaled modes. Set by the
+     * windowing backend before Init() (see Fast3dGui::Init); 1.0 if it could not be detected.
+     */
+    float GetDpiScale() const {
+        return mDpiScale;
+    }
+
+    /**
      * @brief Returns true if the menu bar or the full-screen menu window is currently visible.
      */
     bool GetMenuOrMenubarVisible();
@@ -231,6 +240,7 @@ class Gui {
 
     ImVec2 mTemporaryWindowPos; ///< Scratchpad position used when repositioning windows.
     ImGuiIO* mImGuiIo;          ///< Pointer to the active ImGuiIO context.
+    float mDpiScale = 1.0f;     ///< Physical-pixels-per-point; set by the backend before Init(). See GetDpiScale().
     std::map<std::string, std::shared_ptr<GuiWindow>> mGuiWindows; ///< Registered window map (name → window).
 
   private:
