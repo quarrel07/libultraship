@@ -107,6 +107,12 @@ class Gui {
     void UnblockGamepadNavigation();
     void ShutDownImGui(Ship::Window* window);
 
+    /// Physical-pixels-per-logical-point backing scale of the window, detected at Init().
+    /// Use it as ImGui ImFontConfig::RasterizerDensity so glyphs stay crisp under a HiDPI framebuffer.
+    float GetDpiScale() const {
+        return mDpiScale;
+    }
+
   protected:
     void StartFrame();
     void EndFrame();
@@ -135,6 +141,7 @@ class Gui {
 
   private:
     GuiWindowInitData mImpl;
+    float mDpiScale = 1.0f; ///< Physical-pixels-per-point, computed at Init (see GetDpiScale()).
     bool mNeedsConsoleVariableSave;
     std::string mImGuiIniPath;
     std::string mImGuiLogPath;
