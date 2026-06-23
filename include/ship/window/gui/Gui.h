@@ -159,7 +159,17 @@ class Gui {
      */
     void ShutDownImGui(Ship::Window* window);
 
+    /// Physical-pixels-per-logical-point backing scale of the window, detected at Init().
+    /// Use it as ImGui ImFontConfig::RasterizerDensity so glyphs stay crisp under a HiDPI framebuffer.
+    float GetDpiScale() const {
+        return mDpiScale;
+    }
+
   protected:
+    /// Physical-pixels-per-point backing scale; set by the windowing backend (Fast3dGui::Init) before
+    /// the base Gui::Init() rasterizes fonts. Exposed read-only via GetDpiScale().
+    float mDpiScale = 1.0f;
+
     /** @brief Calls ImGui::NewFrame() after processing backend-specific input. */
     void StartFrame();
 
