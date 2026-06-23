@@ -34,6 +34,10 @@ void GameOverlay::LoadFont(const std::string& name, float fontSize, const Resour
     }
     ImFontConfig fontConf = {};
     fontConf.FontDataOwnedByAtlas = false;
+    // Rasterize at the display backing scale so overlay text stays crisp on HiDPI/Retina (1.0 = no-op).
+    if (auto gui = Context::GetRawInstance()->GetWindow()->GetGui()) {
+        fontConf.RasterizerDensity = gui->GetDpiScale();
+    }
     mFonts[name] = io.Fonts->AddFontFromMemoryTTF(font->Data, font->DataSize, fontSize, &fontConf);
 }
 
@@ -53,6 +57,10 @@ void GameOverlay::LoadFont(const std::string& name, float fontSize, const std::s
     }
     ImFontConfig fontConf = {};
     fontConf.FontDataOwnedByAtlas = false;
+    // Rasterize at the display backing scale so overlay text stays crisp on HiDPI/Retina (1.0 = no-op).
+    if (auto gui = Context::GetRawInstance()->GetWindow()->GetGui()) {
+        fontConf.RasterizerDensity = gui->GetDpiScale();
+    }
     mFonts[name] = io.Fonts->AddFontFromMemoryTTF(font->Data, font->DataSize, fontSize, &fontConf);
 }
 
