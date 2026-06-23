@@ -99,6 +99,12 @@ class Gui {
     std::shared_ptr<GuiMenuBar> GetMenuBar();
     void SetMenu(std::shared_ptr<GuiWindow> menu);
     std::shared_ptr<GuiWindow> GetMenu();
+    // Display backing scale (physical pixels per logical point), computed once at Init from the window.
+    // 1.0 standard-DPI, ~2.0 typical Retina, fractional on scaled modes. Use as ImFontConfig::
+    // RasterizerDensity so glyphs stay crisp under a HiDPI framebuffer.
+    float GetDpiScale() const {
+        return mDpiScale;
+    }
     bool GetMenuOrMenubarVisible();
     bool IsMouseOverAnyGuiItem();
     bool IsMouseOverActivePopup();
@@ -134,6 +140,7 @@ class Gui {
 
   private:
     GuiWindowInitData mImpl;
+    float mDpiScale = 1.0f; ///< Physical-pixels-per-point, computed at Init (see GetDpiScale()).
     bool mNeedsConsoleVariableSave;
     std::shared_ptr<GameOverlay> mGameOverlay;
     std::shared_ptr<GuiMenuBar> mMenuBar;
