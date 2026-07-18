@@ -2,6 +2,7 @@
 
 #include "ship/window/gui/Gui.h"
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
 #include <string>
@@ -64,18 +65,35 @@ void Gui::Init() {
     mImGuiIo = &ImGui::GetIO();
     mImGuiIo->ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NoMouseCursorChange;
 
-    // On macOS Retina the ImGui overlay renders into a 2x framebuffer, but glyphs are rasterized at
-    // the logical point size and stretched up -> fuzzy text. RasterizerDensity rasterizes glyphs at a
-    // higher density without altering their logical size, keeping the UI sharp. Safe elsewhere (1.0).
-#if defined(__APPLE__)
-    const float rasterDensity = 2.0f;
+    // On a HiDPI display the ImGui overlay renders into a framebuffer scaled by DisplayFramebufferScale
+    // (e.g. 2x on Retina), but the glyph atlas is rasterized at the logical point size and stretched up
+    // -> fuzzy text. Compute the real backing scale (physical px / logical pt) from the window and use
+    // it as ImFontConfig::RasterizerDensity so glyphs are rasterized at native density and stay crisp,
+    // without changing any logical sizes/metrics/layout. 1.0 on standard-DPI displays leaves it a no-op.
+    mDpiScale = 1.0f;
+    {
+        WindowBackend backend = Context::GetInstance()->GetWindow()->GetWindowBackend();
+        if (backend == WindowBackend::FAST3D_SDL_OPENGL || backend == WindowBackend::FAST3D_SDL_METAL) {
+            // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
+            auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+            if (sdlWindow != nullptr) {
+                int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+                SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+                SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
 #else
-    const float rasterDensity = 1.0f;
+                SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
 #endif
+                if (logicalW > 0 && pixelW > 0) {
+                    mDpiScale = std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
+                }
+            }
+        }
+    }
 
     // Add Font Awesome and merge it into the default font.
     ImFontConfig defaultFontCfg;
-    defaultFontCfg.RasterizerDensity = rasterDensity;
+    defaultFontCfg.RasterizerDensity = mDpiScale;
     mImGuiIo->Fonts->AddFontDefault(&defaultFontCfg);
     // This must match the default font size, which is 13.0f.
     float baseFontSize = 13.0f;
@@ -86,7 +104,7 @@ void Gui::Init() {
     iconsConfig.MergeMode = true;
     iconsConfig.PixelSnapH = true;
     iconsConfig.GlyphMinAdvanceX = iconFontSize;
-    iconsConfig.RasterizerDensity = rasterDensity;
+    iconsConfig.RasterizerDensity = mDpiScale;
     mImGuiIo->Fonts->AddFontFromMemoryCompressedBase85TTF(fontawesome_compressed_data_base85, iconFontSize,
                                                           &iconsConfig, sIconsRanges);
 
