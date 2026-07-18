@@ -134,6 +134,15 @@ class Gui {
     std::shared_ptr<GuiWindow> GetMenu();
 
     /**
+     * @brief Display backing scale (physical pixels per logical point), computed once at Init from the
+     * window. 1.0 on standard-DPI displays, ~2.0 on typical macOS Retina, fractional on scaled modes.
+     * Use it as ImGui ImFontConfig::RasterizerDensity so glyphs stay crisp under a HiDPI framebuffer.
+     */
+    float GetDpiScale() const {
+        return mDpiScale;
+    }
+
+    /**
      * @brief Returns true if the menu bar or the full-screen menu window is currently visible.
      */
     bool GetMenuOrMenubarVisible();
@@ -223,6 +232,7 @@ class Gui {
     std::map<std::string, std::shared_ptr<GuiWindow>> mGuiWindows; ///< Registered window map (name → window).
 
   private:
+    float mDpiScale = 1.0f; ///< Physical-pixels-per-point, computed at Init (see GetDpiScale()).
     bool mNeedsConsoleVariableSave;
     std::string mImGuiIniPath;
     std::string mImGuiLogPath;
