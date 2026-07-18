@@ -99,8 +99,19 @@ void Gui::Init(GuiWindowInitData windowImpl) {
     mImGuiIo = &ImGui::GetIO();
     mImGuiIo->ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NoMouseCursorChange;
 
+    // On macOS Retina the ImGui overlay renders into a 2x framebuffer, but glyphs are rasterized at
+    // the logical point size and stretched up -> fuzzy text. RasterizerDensity rasterizes glyphs at a
+    // higher density without altering their logical size, keeping the UI sharp. Safe elsewhere (1.0).
+#if defined(__APPLE__)
+    const float rasterDensity = 2.0f;
+#else
+    const float rasterDensity = 1.0f;
+#endif
+
     // Add Font Awesome and merge it into the default font.
-    mImGuiIo->Fonts->AddFontDefault();
+    ImFontConfig defaultFontCfg;
+    defaultFontCfg.RasterizerDensity = rasterDensity;
+    mImGuiIo->Fonts->AddFontDefault(&defaultFontCfg);
     // This must match the default font size, which is 13.0f.
     float baseFontSize = 13.0f;
     // FontAwesome fonts need to have their sizes reduced by 2.0f/3.0f in order to align correctly
@@ -110,6 +121,7 @@ void Gui::Init(GuiWindowInitData windowImpl) {
     iconsConfig.MergeMode = true;
     iconsConfig.PixelSnapH = true;
     iconsConfig.GlyphMinAdvanceX = iconFontSize;
+    iconsConfig.RasterizerDensity = rasterDensity;
     mImGuiIo->Fonts->AddFontFromMemoryCompressedBase85TTF(fontawesome_compressed_data_base85, iconFontSize,
                                                           &iconsConfig, sIconsRanges);
 
