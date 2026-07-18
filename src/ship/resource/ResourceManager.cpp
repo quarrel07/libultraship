@@ -153,6 +153,11 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
     auto file = LoadFileProcess(identifier.Path);
     if (file == nullptr) {
         SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
+        // Hold the cache mutex here like every other mResourceCache write:
+        // concurrent worker-thread misses otherwise race the unordered_map
+        // emplace/rehash and corrupt the table (observed SIGSEGV with many
+        // threads hitting the not-found path simultaneously).
+        const std::lock_guard<std::mutex> lock(mMutex);
         mResourceCache[identifier] = ResourceLoadError::NotFound;
         return nullptr;
     }
