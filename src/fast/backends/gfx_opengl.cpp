@@ -576,6 +576,10 @@ void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
 
 void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) {
+        // See gfx_metal.cpp: skipping leaves the already-created cache entry
+        // bound to a texture that was never filled.
+        SPDLOG_WARN("UploadTexture SKIPPED: zero dims for texture id {} (tile {})",
+                    mCurrentTextureIds[mCurrentTile], mCurrentTile);
         return;
     }
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
