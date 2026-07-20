@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <list>
 #include <stack>
@@ -441,12 +442,22 @@ ColorCombiner* Interpreter::LookupOrCreateColorCombiner(const ColorCombinerKey& 
     return &mPrevCombiner->second;
 }
 
+#ifdef SK_DIAG_TRAP
+// Diagnostic (compiled out by default): every id ever retired, forever. Any
+// later draw that binds one of these is the stale-reference defect acting;
+// the Metal backend logs it at draw-bind time.
+std::unordered_set<uint32_t> gRetiredTexIds;
+#endif
+
 void Interpreter::TextureCacheClear() {
     // Retired ids go to the aging ring, never back into service directly:
     // reusing a recycled id draws foreign art (reproduced on both Metal and
     // OpenGL). StartFrame frees their backend textures once aged out.
     for (const auto& entry : mTextureCache.map) {
         mAgingFreeIds[mIdAgeSlot].push_back(entry.second.texture_id);
+#ifdef SK_DIAG_TRAP
+        gRetiredTexIds.insert(entry.second.texture_id);
+#endif
     }
     mTextureCache.map.clear();
     mTextureCache.lru.clear();
@@ -477,6 +488,9 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
         // Remove the texture that was least recently used
         it = mTextureCache.lru.front().it;
         mAgingFreeIds[mIdAgeSlot].push_back(it->second.texture_id);
+#ifdef SK_DIAG_TRAP
+        gRetiredTexIds.insert(it->second.texture_id);
+#endif
         for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
             if (mRenderingState.mTextures[j] == &*it)
                 mRenderingState.mTextures[j] = nullptr;
@@ -525,6 +539,9 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
                 }
                 mTextureCache.lru.erase(it->second.lru_location);
                 mAgingFreeIds[mIdAgeSlot].push_back(it->second.texture_id);
+#ifdef SK_DIAG_TRAP
+                gRetiredTexIds.insert(it->second.texture_id);
+#endif
                 mTextureCache.map.erase(it->first);
                 again = true;
                 break;
