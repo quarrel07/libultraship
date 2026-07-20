@@ -46,7 +46,11 @@
 #define ARRAY_COUNT(arr) (int32_t)(sizeof(arr) / sizeof(arr[0]))
 
 // MARK: - Helpers
+#include <unordered_set>
 namespace Fast {
+#ifdef SK_DIAG_TRAP
+extern std::unordered_set<uint32_t> gRetiredTexIds;
+#endif
 
 static MTL::SamplerAddressMode gfx_cm_to_metal(uint32_t val) {
     switch (val) {
@@ -596,6 +600,19 @@ void GfxRenderingAPIMetal::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, si
 
     for (int i = 0; i < SHADER_MAX_TEXTURES; i++) {
         if (mShaderProgram->usedTextures[i]) {
+#ifdef SK_DIAG_TRAP
+            // Diagnostic: a draw consuming a retired id IS the stale-reference
+            // defect; log it (rate limited) with everything the backend knows.
+            if (gRetiredTexIds.count(mCurrentTextureIds[i]) != 0) {
+                static int sTrapCooldown = 0;
+                if (sTrapCooldown <= 0) {
+                    sTrapCooldown = 15;
+                    SPDLOG_ERROR("TRAP: draw bound RETIRED texture id {} on shader slot {} (tile {}, program {:#x})",
+                                 mCurrentTextureIds[i], i, mCurrentTile, (uintptr_t)mShaderProgram);
+                }
+                sTrapCooldown--;
+            }
+#endif
             if (current_framebuffer.mLastBoundTextures[i] != mTextures[mCurrentTextureIds[i]].texture) {
                 current_framebuffer.mLastBoundTextures[i] = mTextures[mCurrentTextureIds[i]].texture;
                 current_framebuffer.mCommandEncoder->setFragmentTexture(mTextures[mCurrentTextureIds[i]].texture, i);
