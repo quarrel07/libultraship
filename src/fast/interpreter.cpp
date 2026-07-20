@@ -448,11 +448,8 @@ ColorCombiner* Interpreter::LookupOrCreateColorCombiner(const ColorCombinerKey& 
 }
 
 void Interpreter::TextureCacheClear() {
-    // Retired ids go to the aging ring, never back into service directly:
-    // reusing a recycled id draws foreign art (reproduced on both Metal and
-    // OpenGL). StartFrame frees their backend textures once aged out.
     for (const auto& entry : mTextureCache.map) {
-        mAgingFreeIds[mIdAgeSlot].push_back(entry.second.texture_id);
+        mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
     }
     mTextureCache.map.clear();
     mTextureCache.lru.clear();
@@ -482,7 +479,7 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     if (mTextureCache.map.size() >= TEXTURE_CACHE_MAX_SIZE) {
         // Remove the texture that was least recently used
         it = mTextureCache.lru.front().it;
-        mAgingFreeIds[mIdAgeSlot].push_back(it->second.texture_id);
+        mTextureCache.free_texture_ids.push_back(it->second.texture_id);
         for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
             if (mRenderingState.mTextures[j] == &*it)
                 mRenderingState.mTextures[j] = nullptr;
@@ -530,7 +527,7 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
                         mRenderingState.mTextures[j] = nullptr;
                 }
                 mTextureCache.lru.erase(it->second.lru_location);
-                mAgingFreeIds[mIdAgeSlot].push_back(it->second.texture_id);
+                mTextureCache.free_texture_ids.push_back(it->second.texture_id);
                 mTextureCache.map.erase(it->first);
                 again = true;
                 break;
@@ -1286,21 +1283,14 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
         key = { origAddr, {}, fmt, siz, paletteIndex, origSizeBytes };
     }
 
-    // Guard against zero-sized textures that would cause divide-by-zero
-    // or GPU API errors in UploadTexture. Must run BEFORE TextureCacheLookup:
-    // the lookup inserts a cache entry bound to a (possibly recycled) texture
-    // id on miss, and bailing after that leaves a poisoned entry whose id
-    // still holds another texture's pixels — later frames hit it and draw
-    // foreign art (visible as scrambled textures after a cache clear).
-    if (mRdp->texture_tile[tile].line_size_bytes == 0 || mRdp->loaded_texture[tmemIdex].size_bytes == 0 ||
-        origAddr == nullptr) {
-        SPDLOG_WARN("ImportTexture: skipping degenerate texture addr={} fmt={} siz={} line={} size={}",
-                    (const void*)origAddr, fmt, siz, mRdp->texture_tile[tile].line_size_bytes,
-                    mRdp->loaded_texture[tmemIdex].size_bytes);
+    if (TextureCacheLookup(i, key)) {
         return;
     }
 
-    if (TextureCacheLookup(i, key)) {
+    // Guard against zero-sized textures that would cause divide-by-zero
+    // or GPU API errors in UploadTexture.
+    if (mRdp->texture_tile[tile].line_size_bytes == 0 || mRdp->loaded_texture[tmemIdex].size_bytes == 0 ||
+        origAddr == nullptr) {
         return;
     }
 
@@ -5055,19 +5045,6 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
-    // Retired texture ids are never reused: reuse of a recycled id draws
-    // foreign art (verified empirically on Metal AND OpenGL — corruption onset
-    // tracked exactly with recycled ids re-entering service). Ids age here for
-    // kIdAgeFrames frames so no in-flight frame still references them, then
-    // their backend textures are freed and the id slots abandoned.
-    mIdAgeSlot = (mIdAgeSlot + 1) % kIdAgeFrames;
-    if (!mAgingFreeIds[mIdAgeSlot].empty()) {
-        for (uint32_t id : mAgingFreeIds[mIdAgeSlot]) {
-            mRapi->DeleteTexture(id);
-        }
-        mAgingFreeIds[mIdAgeSlot].clear();
-    }
-
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {
