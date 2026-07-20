@@ -388,23 +388,11 @@ uint32_t GfxRenderingAPIMetal::NewTexture() {
 }
 
 void GfxRenderingAPIMetal::DeleteTexture(uint32_t texID) {
-    // Swap the slot to a shared 1x1 transparent placeholder instead of
-    // nulling it: a binding that outlives the id's retirement then samples
-    // nothing (invisible) rather than a freed texture (undefined, visible
-    // as flat grey geometry).
-    if (mPlaceholderTexture == nullptr) {
-        MTL::TextureDescriptor* desc =
-            MTL::TextureDescriptor::texture2DDescriptor(MTL::PixelFormatRGBA8Unorm, 1, 1, false);
-        desc->setStorageMode(MTL::StorageModeShared);
-        mPlaceholderTexture = mDevice->newTexture(desc);
-        const uint32_t clear = 0;
-        mPlaceholderTexture->replaceRegion(MTL::Region::Make2D(0, 0, 1, 1), 0, &clear, 4);
-    }
     TextureDataMetal& t = mTextures[texID];
-    if (t.texture != nullptr && t.texture != mPlaceholderTexture) {
+    if (t.texture != nullptr) {
         t.texture->release();
+        t.texture = nullptr;
     }
-    t.texture = mPlaceholderTexture;
     if (t.msaaTexture != nullptr) {
         t.msaaTexture->release();
         t.msaaTexture = nullptr;

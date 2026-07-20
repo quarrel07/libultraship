@@ -558,16 +558,7 @@ GLuint GfxRenderingAPIOGL::NewTexture() {
 }
 
 void GfxRenderingAPIOGL::DeleteTexture(uint32_t texID) {
-    // Shrink to a 1x1 transparent texel instead of deleting the name: a
-    // binding that outlives the id's retirement then samples nothing
-    // (invisible) rather than a deleted name (undefined), and the name is
-    // never recycled by glGenTextures while our id table still tracks it.
-    GLint prev;
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
-    glBindTexture(GL_TEXTURE_2D, texID);
-    const uint32_t clear = 0;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &clear);
-    glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+    glDeleteTextures(1, &texID);
 }
 
 void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {

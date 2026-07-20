@@ -196,7 +196,6 @@ class GfxRenderingAPIMetal final : public GfxRenderingAPI {
         mShaderProgramPool;
 
     std::vector<struct TextureDataMetal> mTextures;
-    MTL::Texture* mPlaceholderTexture = nullptr; // stale-binding-safe stand-in for retired textures
     std::vector<FramebufferMetal> mFramebuffers;
     FrameUniforms mFrameUniforms;
     CoordUniforms mCoordUniforms;
