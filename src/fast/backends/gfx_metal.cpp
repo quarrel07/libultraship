@@ -386,6 +386,15 @@ uint32_t GfxRenderingAPIMetal::NewTexture() {
 }
 
 void GfxRenderingAPIMetal::DeleteTexture(uint32_t texID) {
+    TextureDataMetal& t = mTextures[texID];
+    if (t.texture != nullptr) {
+        t.texture->release();
+        t.texture = nullptr;
+    }
+    if (t.msaaTexture != nullptr) {
+        t.msaaTexture->release();
+        t.msaaTexture = nullptr;
+    }
 }
 
 void GfxRenderingAPIMetal::SelectTexture(int tile, uint32_t texture_id) {
@@ -395,6 +404,11 @@ void GfxRenderingAPIMetal::SelectTexture(int tile, uint32_t texture_id) {
 
 void GfxRenderingAPIMetal::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) {
+        // The cache entry for this id already exists; skipping here leaves it
+        // bound to a texture that was never filled (black on a fresh id,
+        // foreign pixels on a recycled one).
+        SPDLOG_WARN("UploadTexture SKIPPED: zero dims for texture id {} (tile {})",
+                    mCurrentTextureIds[mCurrentTile], mCurrentTile);
         return;
     }
 
@@ -411,18 +425,20 @@ void GfxRenderingAPIMetal::UploadTexture(const uint8_t* rgba32_buf, uint32_t wid
 
     MTL::Region region = MTL::Region::Make2D(0, 0, width, height);
 
-    MTL::Texture* texture = texture_data->texture;
-    if (texture_data->texture == nullptr || texture_data->texture->width() != width ||
-        texture_data->texture->height() != height) {
-        if (texture_data->texture != nullptr)
-            texture_data->texture->release();
-
-        texture = mDevice->newTexture(texture_descriptor);
-    }
+    // Always upload into a fresh texture object. Reusing the old object via
+    // replaceRegion mutates contents the GPU samples at command-buffer
+    // execution, so draws already encoded this frame against the old pixels
+    // retroactively show the new ones (visible as scrambled textures during
+    // the re-import burst after a cache clear). Command buffers retain the
+    // old object until in-flight frames finish, so releasing it here is safe.
+    MTL::Texture* texture = mDevice->newTexture(texture_descriptor);
 
     NS::UInteger bytes_per_pixel = 4;
     NS::UInteger bytes_per_row = bytes_per_pixel * width;
     texture->replaceRegion(region, 0, rgba32_buf, bytes_per_row);
+    if (texture_data->texture != nullptr) {
+        texture_data->texture->release();
+    }
     texture_data->texture = texture;
 
     autorelease_pool->release();
