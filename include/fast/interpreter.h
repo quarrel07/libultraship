@@ -508,6 +508,12 @@ class Interpreter {
     RenderingState mRenderingState{};
 
     GfxTextureCache mTextureCache{};
+    // Freed texture ids age here for kIdAgeFrames frames before rejoining
+    // free_texture_ids: immediate reuse re-targets ids that in-flight frames
+    // still reference, drawing foreign pixels after a cache clear.
+    static constexpr int kIdAgeFrames = 240;
+    std::vector<uint32_t> mAgingFreeIds[kIdAgeFrames];
+    int mIdAgeSlot = 0;
     std::map<ColorCombinerKey, ColorCombiner> mColorCombinerPool; // color_combiner_pool;
     std::map<ColorCombinerKey, ColorCombiner>::iterator mPrevCombiner = mColorCombinerPool.end();
     uint8_t* mTexUploadBuffer = nullptr;
