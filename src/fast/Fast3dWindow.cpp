@@ -134,7 +134,11 @@ uint16_t Fast3dWindow::GetPixelDepth(float x, float y) {
 }
 
 void Fast3dWindow::InitWindowManager() {
-    SetWindowBackend(GetSavedWindowBackend());
+    // Resolve without persisting: launching must never rewrite the saved
+    // choice, or a resolution bug destroys the config it misread (the
+    // ID-renumbering incident overwrote saved Metal configs with OpenGL on
+    // first launch). GetSavedWindowBackend still heals a stale ID by name.
+    SetWindowBackend(GetSavedWindowBackend(), false);
 
     switch (GetWindowBackend()) {
 #ifdef ENABLE_DX11

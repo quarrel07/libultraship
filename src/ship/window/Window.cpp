@@ -120,8 +120,11 @@ std::shared_ptr<MouseStateManager> Window::GetMouseStateManager() {
     return mMouseStateManager;
 }
 
-void Window::SetWindowBackend(int32_t backend) {
+void Window::SetWindowBackend(int32_t backend, bool persist) {
     mWindowBackend = backend;
+    if (!persist) {
+        return;
+    }
     mConfig->SetInt("Window.Backend.Id", GetWindowBackend());
     mConfig->SetString("Window.Backend.Name", GetWindowBackendName());
     mConfig->Save();

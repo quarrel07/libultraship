@@ -26,6 +26,7 @@ namespace {
 class TestFast3dWindow final : public Fast::Fast3dWindow {
   public:
     using Fast::Fast3dWindow::GetSavedWindowBackend;
+    using Fast::Fast3dWindow::SetWindowBackend;
 };
 
 class WindowBackendMigrationTest : public ::testing::Test {
@@ -112,4 +113,17 @@ TEST_F(WindowBackendMigrationTest, PreRenumberingMetalConfigStaysOnMetal) {
 
     EXPECT_EQ(sWindow->GetSavedWindowBackend(), Fast::WindowBackend::FAST3D_SDL_METAL);
     EXPECT_EQ(mConfig->GetInt("Window.Backend.Id", -1), Fast::WindowBackend::FAST3D_SDL_METAL);
+}
+
+// Startup resolution must never rewrite the saved choice; only an explicit
+// (persisting) backend change may. A resolve-and-rewrite on launch is what
+// let the renumbering bug permanently overwrite saved configs.
+TEST_F(WindowBackendMigrationTest, NonPersistingSetLeavesConfigUntouched) {
+    sWindow->SetWindowBackend(Fast::WindowBackend::FAST3D_SDL_OPENGL, false);
+    EXPECT_EQ(mConfig->GetInt("Window.Backend.Id", -1), -1);
+    EXPECT_EQ(mConfig->GetString("Window.Backend.Name", ""), "");
+
+    sWindow->SetWindowBackend(Fast::WindowBackend::FAST3D_SDL_OPENGL);
+    EXPECT_EQ(mConfig->GetInt("Window.Backend.Id", -1), Fast::WindowBackend::FAST3D_SDL_OPENGL);
+    EXPECT_EQ(mConfig->GetString("Window.Backend.Name", ""), "OpenGL");
 }
