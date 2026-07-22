@@ -5040,7 +5040,11 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
 void Interpreter::Destroy() {
     // TODO: should also destroy rapi, and any other resources acquired in fast3d
     free(mTexUploadBuffer);
-    mWapi->Destroy();
+    // mWapi is only assigned in Init; a window constructed but never
+    // initialized must still be destructible.
+    if (mWapi != nullptr) {
+        mWapi->Destroy();
+    }
 
     // Texture cache and loaded textures store references to Resources which need to be unreferenced.
     TextureCacheClear();
