@@ -1,9 +1,12 @@
 #include "fast/Fast3dGui.h"
 
+#include <algorithm>
+
 #include "fast/Fast3dWindow.h"
 #include "ship/Context.h"
 #include "ship/config/ConsoleVariable.h"
 #include "fast/backends/gfx_metal.h"
+#include "ship/utils/macUtils.h"
 #include "fast/interpreter.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/resource/type/Texture.h"
@@ -48,6 +51,25 @@ Fast3dGui::Fast3dGui(std::vector<std::shared_ptr<Ship::GuiWindow>> guiWindows) :
 void Fast3dGui::Init(GuiWindowInitData windowImpl) {
     mImpl = windowImpl;
     Gui::Init();
+}
+
+float Fast3dGui::ComputeDpiScale() {
+    // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
+    auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+    if (sdlWindow == nullptr) {
+        return 1.0f;
+    }
+    int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+    SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
+#else
+    SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
+#endif
+    if (logicalW > 0 && pixelW > 0) {
+        return std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
+    }
+    return 1.0f;
 }
 
 bool Fast3dGui::SupportsViewports() {
@@ -303,6 +325,27 @@ void Fast3dGui::DrawFloatingWindows() {
     }
 }
 
+#ifdef __APPLE__
+// Points at the top of the game area currently hidden behind the display's notch,
+// unless the user disabled the safe-area letterbox. Non-zero only for a fullscreen
+// window on a notched display (macOS sizes those to screen-minus-menu-bar, which is
+// a few points taller than the true area below the camera housing).
+static float GetNotchLetterboxTop(void* sdlWindow) {
+    if (sdlWindow == nullptr ||
+        !Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gNotchSafeAreaLetterbox", 1)) {
+        return 0.0f;
+    }
+    // Notch mode renders into the housing rows only while the game says the
+    // current scene is full-bleed (racing). Flat scenes (boot logo, menus) keep
+    // the classic below-notch letterbox so framed compositions never get sliced.
+    if (isMacFullPanelModeActive(static_cast<SDL_Window*>(sdlWindow)) &&
+        Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gNotchFullBleedNow", 0)) {
+        return 0.0f;
+    }
+    return getMacWindowNotchHiddenTopPoints(static_cast<SDL_Window*>(sdlWindow));
+}
+#endif
+
 void Fast3dGui::CalculateGameViewport() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -319,9 +362,49 @@ void Fast3dGui::CalculateGameViewport() {
     mainPos.x -= mTemporaryWindowPos.x;
     mainPos.y -= mTemporaryWindowPos.y;
     ImVec2 size = ImGui::GetContentRegionAvail();
+#ifdef __APPLE__
+    // Keep the game below the notch: shift the viewport down and shrink it by the
+    // rows a fullscreen window puts behind the camera housing, so the visible area
+    // (and the aspect ratio computed from it) matches the panel below the notch.
+    const float notchTop = GetNotchLetterboxTop(mImpl.Opengl.Window);
+    mainPos.y += notchTop;
+    size.y -= notchTop;
+#endif
+    // ImGui coordinates are logical points, but the render framebuffer is measured
+    // in physical pixels. Scale the internal render size by the display backing
+    // scale so a 100% internal resolution means the display's true pixels instead
+    // of half on Retina (no-op on standard-DPI displays, where dpiScale is 1.0).
+    // The viewport rectangle deliberately stays in points: window geometry is
+    // point-based on macOS, so at 2x the viewport correctly reads half the
+    // internal resolution.
+    const float dpiScale = GetDpiScale();
+#ifdef __APPLE__
+    // Publish the vertical-FOV expansion factor for notch mode: full window height
+    // over the classic (below-notch) height. 1.0 whenever full-panel isn't live.
+    {
+        float expand = 1.0f;
+        auto* sdlWin = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+        if (sdlWin != nullptr && isMacFullPanelModeActive(sdlWin)) {
+            // A forced aspect ratio keeps the classic frame shape (pinned below the
+            // notch), so the FOV expansion must not apply on top of it.
+            const bool aspectForced =
+                Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(
+                    CVAR_PREFIX_ADVANCED_RESOLUTION ".Enabled", 0) &&
+                Ship::Context::GetRawInstance()->GetConsoleVariables()->GetFloat(
+                    CVAR_PREFIX_ADVANCED_RESOLUTION ".AspectRatioX", 0.0f) > 0.0f &&
+                Ship::Context::GetRawInstance()->GetConsoleVariables()->GetFloat(
+                    CVAR_PREFIX_ADVANCED_RESOLUTION ".AspectRatioY", 0.0f) > 0.0f;
+            const float hidden = getMacWindowNotchHiddenTopPoints(sdlWin);
+            if (!aspectForced && hidden > 0.0f && size.y > hidden) {
+                expand = size.y / (size.y - hidden);
+            }
+        }
+        Ship::Context::GetRawInstance()->GetConsoleVariables()->SetFloat("gNotchVertExpand", expand);
+    }
+#endif
     const auto interpreter = mInterpreter.lock().get();
-    interpreter->mCurDimensions.width = (uint32_t)(size.x * mInterpreter.lock()->mCurDimensions.internal_mul);
-    interpreter->mCurDimensions.height = (uint32_t)(size.y * mInterpreter.lock()->mCurDimensions.internal_mul);
+    interpreter->mCurDimensions.width = (uint32_t)(size.x * dpiScale * mInterpreter.lock()->mCurDimensions.internal_mul);
+    interpreter->mCurDimensions.height = (uint32_t)(size.y * dpiScale * mInterpreter.lock()->mCurDimensions.internal_mul);
     interpreter->mGameWindowViewport.x = (int16_t)mainPos.x;
     interpreter->mGameWindowViewport.y = (int16_t)mainPos.y;
     interpreter->mGameWindowViewport.width = (int16_t)size.x;
@@ -377,6 +460,12 @@ void Fast3dGui::DrawGame() {
     ImVec2 size = ImGui::GetContentRegionAvail();
     ImVec2 pos = ImVec2(0, 0);
     const auto interpreter = mInterpreter.lock().get();
+#ifdef __APPLE__
+    // Match CalculateGameViewport: place the game image below the notch and size the
+    // aspect math against the actually-visible region (letterboxing the hidden rows).
+    const float notchTop = GetNotchLetterboxTop(mImpl.Opengl.Window);
+    size.y -= notchTop;
+#endif
 
     if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_LOW_RES_MODE, 0) ==
         1) { // N64 Mode takes priority
@@ -402,6 +491,19 @@ void Fast3dGui::DrawGame() {
                     sPosX = 0.0f;   // clamp x position
                     sWdth = size.x; // reset width
                 }
+#ifdef __APPLE__
+                // Notch mode: pin a letterboxed image below the camera housing
+                // instead of centering it underneath the notch.
+                {
+                    auto* sdlWinPin = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+                    if (sdlWinPin != nullptr && isMacFullPanelModeActive(sdlWinPin)) {
+                        const float hidden = getMacWindowNotchHiddenTopPoints(sdlWinPin);
+                        if (hidden > 0.0f && sPosY < hidden) {
+                            sPosY = std::min(hidden, size.y - sHght);
+                        }
+                    }
+                }
+#endif
                 pos = ImVec2(sPosX, sPosY);
                 size = ImVec2(sWdth, sHght);
             }

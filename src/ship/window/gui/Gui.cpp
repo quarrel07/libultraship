@@ -70,26 +70,7 @@ void Gui::Init() {
     // -> fuzzy text. Compute the real backing scale (physical px / logical pt) from the window and use
     // it as ImFontConfig::RasterizerDensity so glyphs are rasterized at native density and stay crisp,
     // without changing any logical sizes/metrics/layout. 1.0 on standard-DPI displays leaves it a no-op.
-    mDpiScale = 1.0f;
-    {
-        WindowBackend backend = Context::GetInstance()->GetWindow()->GetWindowBackend();
-        if (backend == WindowBackend::FAST3D_SDL_OPENGL || backend == WindowBackend::FAST3D_SDL_METAL) {
-            // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
-            auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
-            if (sdlWindow != nullptr) {
-                int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
-                SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
-#if SDL_VERSION_ATLEAST(2, 26, 0)
-                SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
-#else
-                SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
-#endif
-                if (logicalW > 0 && pixelW > 0) {
-                    mDpiScale = std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
-                }
-            }
-        }
-    }
+    mDpiScale = ComputeDpiScale();
 
     // Add Font Awesome and merge it into the default font.
     ImFontConfig defaultFontCfg;
@@ -145,6 +126,10 @@ void Gui::Init() {
 }
 
 void Gui::ImGuiWMInit() {
+}
+
+float Gui::ComputeDpiScale() {
+    return 1.0f;
 }
 
 void Gui::ShutDownImGui(Ship::Window* window) {
@@ -327,6 +312,27 @@ void Gui::EndFrame() {
     ImGuiRenderDrawData(ImGui::GetDrawData());
     ImGui::EndFrame();
 }
+
+#ifdef __APPLE__
+// Points at the top of the game area currently hidden behind the display's notch,
+// unless the user disabled the safe-area letterbox. Non-zero only for a fullscreen
+// window on a notched display (macOS sizes those to screen-minus-menu-bar, which is
+// a few points taller than the true area below the camera housing).
+static float GetNotchLetterboxTop(void* sdlWindow) {
+    if (sdlWindow == nullptr ||
+        !Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchSafeAreaLetterbox", 1)) {
+        return 0.0f;
+    }
+    // Notch mode renders into the housing rows only while the game says the
+    // current scene is full-bleed (racing). Flat scenes (boot logo, menus) keep
+    // the classic below-notch letterbox so framed compositions never get sliced.
+    if (isMacFullPanelModeActive(static_cast<SDL_Window*>(sdlWindow)) &&
+        Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchFullBleedNow", 0)) {
+        return 0.0f;
+    }
+    return getMacWindowNotchHiddenTopPoints(static_cast<SDL_Window*>(sdlWindow));
+}
+#endif
 
 void Gui::CalculateGameViewport() {
 }
