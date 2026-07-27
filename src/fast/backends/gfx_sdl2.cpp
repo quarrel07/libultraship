@@ -233,11 +233,33 @@ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
     }
 
 #if defined(__APPLE__)
-    // Implement fullscreening with native macOS APIs
-    if (on != isNativeMacOSFullscreenActive(mWnd)) {
-        toggleNativeMacOSFullscreen(mWnd);
+    // Decide by the window's ACTUAL state, not just settings: the notch CVar only
+    // picks which mode a fullscreen ENTRY uses; exits leave whichever mode is live.
+    // (Trusting the CVar here crashed when it changed while already fullscreen.)
+    {
+        const bool panelActive = isMacFullPanelModeActive(mWnd);
+        const bool nativeActive = isNativeMacOSFullscreenActive(mWnd);
+        const bool wantPanel =
+            Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchMode", 0) ||
+            getenv("SK_FULLPANEL") != nullptr;
+        if (on) {
+            if (!panelActive && !nativeActive) {
+                if (!wantPanel || !enterMacFullPanelMode(mWnd)) {
+                    toggleNativeMacOSFullscreen(mWnd);
+                }
+            }
+            // already fullscreen in some mode: mode changes apply on re-entry
+        } else {
+            if (panelActive) {
+                exitMacFullPanelMode(mWnd);
+            } else if (nativeActive) {
+                toggleNativeMacOSFullscreen(mWnd);
+            }
+        }
+        mFullScreen = on;
+        Ship::Context::GetInstance()->GetConsoleVariables()->SetInteger("gNotchPanelActiveNow",
+                                                                       isMacFullPanelModeActive(mWnd) ? 1 : 0);
     }
-    mFullScreen = on;
 #else
     if (SDL_SetWindowFullscreen(
             mWnd, on ? (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_SDL_WINDOWED_FULLSCREEN, 0)
@@ -636,7 +658,19 @@ void GfxWindowBackendSDL2::HandleEvents() {
 
     // resync fullscreen state
 #ifdef __APPLE__
-    auto nextFullscreenState = isNativeMacOSFullscreenActive(mWnd);
+    // Auto re-entry after a notch-mode change: the settings callback exits
+    // fullscreen and sets this flag; once the previous mode has fully finished
+    // exiting (native fullscreen animates out), enter again in the new mode.
+    if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchReenterPending", 0) &&
+        !isNativeMacOSFullscreenActive(mWnd) && !isMacFullPanelModeActive(mWnd)) {
+        Ship::Context::GetInstance()->GetConsoleVariables()->SetInteger("gNotchReenterPending", 0);
+        SetFullscreenImpl(true, true);
+    }
+
+    // Full-panel mode is not a native fullscreen space; don't let the resync
+    // logic knock it back out.
+    auto nextFullscreenState =
+        isMacFullPanelModeActive(mWnd) ? mFullScreen : isNativeMacOSFullscreenActive(mWnd);
     if (mFullScreen != nextFullscreenState) {
         mFullScreen = nextFullscreenState;
         if (mOnFullscreenChanged != nullptr) {
