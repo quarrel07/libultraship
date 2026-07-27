@@ -689,7 +689,13 @@ void Gui::CalculateGameViewport() {
     // The viewport rectangle deliberately stays in points: window geometry is
     // point-based on macOS, so at 2x the viewport correctly reads half the
     // internal resolution.
+#ifdef __APPLE__
+    // macOS only: window geometry is points while the framebuffer is pixels.
+    // Windows/Linux report window sizes in pixels already, so scale by 1 there.
     const float dpiScale = GetDpiScale();
+#else
+    const float dpiScale = 1.0f;
+#endif
 #ifdef __APPLE__
     // Publish the vertical-FOV expansion factor for notch mode: full window height
     // over the classic (below-notch) height. 1.0 whenever full-panel isn't live.
