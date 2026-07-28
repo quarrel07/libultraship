@@ -642,7 +642,11 @@ void Gui::EndFrame() {
 // unless the user disabled the safe-area letterbox. Non-zero only for a fullscreen
 // window on a notched display (macOS sizes those to screen-minus-menu-bar, which is
 // a few points taller than the true area below the camera housing).
-static float GetNotchLetterboxTop(void* sdlWindow) {
+// Computed once per frame in CalculateGameViewport (window-system and ObjC
+// queries are not free); DrawGame reads the cached value so both always agree.
+static float sNotchLetterboxTop = 0.0f;
+
+static float ComputeNotchLetterboxTop(void* sdlWindow) {
     if (sdlWindow == nullptr ||
         !Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchSafeAreaLetterbox", 1)) {
         return 0.0f;
@@ -678,7 +682,8 @@ void Gui::CalculateGameViewport() {
     // Keep the game below the notch: shift the viewport down and shrink it by the
     // rows a fullscreen window puts behind the camera housing, so the visible area
     // (and the aspect ratio computed from it) matches the panel below the notch.
-    const float notchTop = GetNotchLetterboxTop(mImpl.Opengl.Window);
+    sNotchLetterboxTop = ComputeNotchLetterboxTop(mImpl.Opengl.Window);
+    const float notchTop = sNotchLetterboxTop;
     mainPos.y += notchTop;
     size.y -= notchTop;
 #endif
@@ -700,6 +705,7 @@ void Gui::CalculateGameViewport() {
     // Publish the vertical-FOV expansion factor for notch mode: full window height
     // over the classic (below-notch) height. 1.0 whenever full-panel isn't live.
     {
+        static float sLastExpand = -1.0f;
         float expand = 1.0f;
         auto* sdlWin = static_cast<SDL_Window*>(mImpl.Opengl.Window);
         if (sdlWin != nullptr && isMacFullPanelModeActive(sdlWin)) {
@@ -717,7 +723,10 @@ void Gui::CalculateGameViewport() {
                 expand = size.y / (size.y - hidden);
             }
         }
-        Context::GetInstance()->GetConsoleVariables()->SetFloat("gNotchVertExpand", expand);
+        if (expand != sLastExpand) {
+            sLastExpand = expand;
+            Context::GetInstance()->GetConsoleVariables()->SetFloat("gNotchVertExpand", expand);
+        }
     }
 #endif
     mInterpreter.lock()->mCurDimensions.width =
@@ -781,7 +790,7 @@ void Gui::DrawGame() {
 #ifdef __APPLE__
     // Match CalculateGameViewport: place the game image below the notch and size the
     // aspect math against the actually-visible region (letterboxing the hidden rows).
-    const float notchTop = GetNotchLetterboxTop(mImpl.Opengl.Window);
+    const float notchTop = sNotchLetterboxTop;
     size.y -= notchTop;
 #endif
     if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_LOW_RES_MODE, 0) ==

@@ -46,6 +46,13 @@ void exitMacFullPanelMode(SDL_Window* window);
 /** @brief True while the window is in full-panel (into-the-notch) mode. */
 bool isMacFullPanelModeActive(SDL_Window* window);
 
+/**
+ * @brief Diagnostics: returns and resets the display-link cadence stats gathered
+ * while full-panel mode is active (callback-to-callback intervals in ms).
+ * All outputs are zero when the display link is not running.
+ */
+void getAndResetDisplayCadence(double* avgMs, double* minMs, double* maxMs, int* count);
+
 #ifdef __cplusplus
 }
 #endif
