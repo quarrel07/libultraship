@@ -1,6 +1,13 @@
 #define NOMINMAX
 
 #include <math.h>
+#include <vector>
+#include <algorithm>
+#include <string>
+#ifdef __APPLE__
+#include <CoreGraphics/CoreGraphics.h>
+#include "ship/utils/macUtils.h"
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5076,6 +5083,75 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
+    // SK_FRAMELOG=1 diagnostics: run-condition banner (logged on change), frame-
+    // interval histogram (every 5 s), spike lines (>36 ms), and display-cadence
+    // summary. Finder-launched trial runs leave complete, self-labeling evidence.
+    {
+        static const bool sFrameLog = getenv("SK_FRAMELOG") != nullptr;
+        if (sFrameLog) {
+            auto cvars = Ship::Context::GetInstance()->GetConsoleVariables();
+            {
+                static std::string sLastBanner;
+                double displayHz = 0.0;
+#ifdef __APPLE__
+                if (CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID())) {
+                    displayHz = CGDisplayModeGetRefreshRate(mode);
+                    CGDisplayModeRelease(mode);
+                }
+#endif
+                char banner[256];
+                snprintf(banner, sizeof(banner),
+                         "COND notch=%d panel=%d fullbleed=%d fps=%d match=%d vsync=%d displayHz=%.0f win=%ux%u",
+                         cvars->GetInteger("gNotchMode", 0), cvars->GetInteger("gNotchPanelActiveNow", 0),
+                         cvars->GetInteger("gNotchFullBleedNow", 0), cvars->GetInteger("gInterpolationFPS", 30),
+                         cvars->GetInteger("gMatchRefreshRate", 0), cvars->GetInteger("gVsyncEnabled", 1), displayHz,
+                         mGfxCurrentWindowDimensions.width, mGfxCurrentWindowDimensions.height);
+                if (sLastBanner != banner) {
+                    sLastBanner = banner;
+                    SPDLOG_INFO("{}", banner);
+                }
+            }
+            static auto sLastFrame = std::chrono::steady_clock::now();
+            static std::vector<double> sIntervals;
+            static double sWindowAccum = 0.0;
+            const auto now = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(now - sLastFrame).count();
+            sLastFrame = now;
+            if (ms < 5000.0) {
+                sIntervals.push_back(ms);
+                sWindowAccum += ms;
+            }
+            if (ms > 36.0) {
+                SPDLOG_INFO("FRAMESPIKE {:.1f} ms", ms);
+            }
+            if (sWindowAccum >= 5000.0 && sIntervals.size() >= 10) {
+                std::vector<double> sorted = sIntervals;
+                std::sort(sorted.begin(), sorted.end());
+                const size_t n = sorted.size();
+                const double median = sorted[n / 2];
+                const double p95 = sorted[(size_t)((double)n * 0.95)];
+                double sum = 0.0;
+                size_t deviant = 0;
+                for (double v : sorted) {
+                    sum += v;
+                    if (v > median * 1.25 || v < median * 0.75) {
+                        deviant++;
+                    }
+                }
+                double dcAvg = 0.0, dcMin = 0.0, dcMax = 0.0;
+                int dcN = 0;
+#ifdef __APPLE__
+                getAndResetDisplayCadence(&dcAvg, &dcMin, &dcMax, &dcN);
+#endif
+                SPDLOG_INFO("FRAMEHIST n={} avg={:.2f} med={:.2f} p95={:.2f} max={:.2f} deviant={:.1f}% | display "
+                            "n={} avg={:.2f} min={:.2f} max={:.2f}",
+                            n, sum / n, median, p95, sorted[n - 1], 100.0 * (double)deviant / (double)n, dcN, dcAvg,
+                            dcMin, dcMax);
+                sIntervals.clear();
+                sWindowAccum = 0.0;
+            }
+        }
+    }
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {
@@ -5088,6 +5164,10 @@ void Interpreter::StartFrame() {
     if (mCurDimensions.width != mPrvDimensions.width || mCurDimensions.height != mPrvDimensions.height ||
         mNativeDimensions.width != mPrevNativeDimensions.width ||
         mNativeDimensions.height != mPrevNativeDimensions.height) {
+        if (getenv("SK_FRAMELOG") != nullptr) {
+            SPDLOG_INFO("FBRESIZE {}x{} -> {}x{}", mPrvDimensions.width, mPrvDimensions.height, mCurDimensions.width,
+                        mCurDimensions.height);
+        }
 
         for (auto& fb : mFrameBuffers) {
             uint32_t width = fb.second.orig_width, height = fb.second.orig_height;
