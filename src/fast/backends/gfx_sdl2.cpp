@@ -236,15 +236,18 @@ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
     }
 
 #if defined(__APPLE__)
-    // Decide by the window's ACTUAL state, not just settings: the notch CVar only
-    // picks which mode a fullscreen ENTRY uses; exits leave whichever mode is live.
-    // (Trusting the CVar here crashed when it changed while already fullscreen.)
+    // Decide by the window's ACTUAL state, not just settings: exits leave whichever
+    // mode is live. (Trusting a mode setting here crashed when it changed while
+    // already fullscreen.)
     {
         const bool panelActive = isMacFullPanelModeActive(mWnd);
         const bool nativeActive = isNativeMacOSFullscreenActive(mWnd);
-        const bool wantPanel =
-            Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchMode", 0) ||
-            getenv("SK_FULLPANEL") != nullptr;
+        // Full-panel (notch) mode is PARKED: no user-facing entry. Idle flat
+        // scenes judder because macOS serves non-space windows on an adaptive
+        // 120/60 refresh slot schedule, and every app-side counter-measure
+        // measured dead. SK_FULLPANEL=1 keeps the path reachable for future
+        // presenter-side work; the exit/guard logic stays for safety.
+        const bool wantPanel = getenv("SK_FULLPANEL") != nullptr;
         if (on) {
             if (!panelActive && !nativeActive) {
                 if (!wantPanel || !enterMacFullPanelMode(mWnd)) {
@@ -352,6 +355,19 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     SDL_Init(SDL_INIT_VIDEO);
 
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+
+#if defined(__APPLE__)
+    // Notch-mode state CVars are runtime flags, not preferences; clear anything a
+    // previous run (or crash) left in the saved config so no notch-scoped logic can
+    // engage before the real state is republished.
+    {
+        auto cvars = Ship::Context::GetInstance()->GetConsoleVariables();
+        cvars->SetInteger("gNotchPanelActiveNow", 0);
+        cvars->SetInteger("gNotchReenterPending", 0);
+        cvars->SetInteger("gNotchFullBleedNow", 0);
+        cvars->SetFloat("gNotchVertExpand", 1.0f);
+    }
+#endif
 
 #if defined(__APPLE__)
     bool use_opengl = strcmp(gfxApiName, "OpenGL") == 0;
