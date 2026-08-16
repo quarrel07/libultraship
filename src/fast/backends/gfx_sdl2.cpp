@@ -263,7 +263,7 @@ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
             }
         }
         mFullScreen = on;
-        Ship::Context::GetInstance()->GetConsoleVariables()->SetInteger("gNotchPanelActiveNow",
+        Ship::Context::GetRawInstance()->GetConsoleVariables()->SetInteger("gNotchPanelActiveNow",
                                                                        isMacFullPanelModeActive(mWnd) ? 1 : 0);
     }
 #else
@@ -361,7 +361,7 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     // previous run (or crash) left in the saved config so no notch-scoped logic can
     // engage before the real state is republished.
     {
-        auto cvars = Ship::Context::GetInstance()->GetConsoleVariables();
+        auto cvars = Ship::Context::GetRawInstance()->GetConsoleVariables();
         cvars->SetInteger("gNotchPanelActiveNow", 0);
         cvars->SetInteger("gNotchReenterPending", 0);
         cvars->SetInteger("gNotchFullBleedNow", 0);
@@ -716,9 +716,9 @@ void GfxWindowBackendSDL2::HandleEvents() {
     // Auto re-entry after a notch-mode change: the settings callback exits
     // fullscreen and sets this flag; once the previous mode has fully finished
     // exiting (native fullscreen animates out), enter again in the new mode.
-    if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchReenterPending", 0) &&
+    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gNotchReenterPending", 0) &&
         !isNativeMacOSFullscreenActive(mWnd) && !isMacFullPanelModeActive(mWnd)) {
-        Ship::Context::GetInstance()->GetConsoleVariables()->SetInteger("gNotchReenterPending", 0);
+        Ship::Context::GetRawInstance()->GetConsoleVariables()->SetInteger("gNotchReenterPending", 0);
         SetFullscreenImpl(true, true);
     }
 

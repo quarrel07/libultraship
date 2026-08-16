@@ -313,27 +313,6 @@ void Gui::EndFrame() {
     ImGui::EndFrame();
 }
 
-#ifdef __APPLE__
-// Points at the top of the game area currently hidden behind the display's notch,
-// unless the user disabled the safe-area letterbox. Non-zero only for a fullscreen
-// window on a notched display (macOS sizes those to screen-minus-menu-bar, which is
-// a few points taller than the true area below the camera housing).
-static float GetNotchLetterboxTop(void* sdlWindow) {
-    if (sdlWindow == nullptr ||
-        !Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchSafeAreaLetterbox", 1)) {
-        return 0.0f;
-    }
-    // Notch mode renders into the housing rows only while the game says the
-    // current scene is full-bleed (racing). Flat scenes (boot logo, menus) keep
-    // the classic below-notch letterbox so framed compositions never get sliced.
-    if (isMacFullPanelModeActive(static_cast<SDL_Window*>(sdlWindow)) &&
-        Context::GetInstance()->GetConsoleVariables()->GetInteger("gNotchFullBleedNow", 0)) {
-        return 0.0f;
-    }
-    return getMacWindowNotchHiddenTopPoints(static_cast<SDL_Window*>(sdlWindow));
-}
-#endif
-
 void Gui::CalculateGameViewport() {
 }
 

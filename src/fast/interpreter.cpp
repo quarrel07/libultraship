@@ -5089,7 +5089,7 @@ void Interpreter::StartFrame() {
     {
         static const bool sFrameLog = getenv("SK_FRAMELOG") != nullptr;
         if (sFrameLog) {
-            auto cvars = Ship::Context::GetInstance()->GetConsoleVariables();
+            auto cvars = Ship::Context::GetRawInstance()->GetConsoleVariables();
             {
                 static std::string sLastBanner;
                 double displayHz = 0.0;
