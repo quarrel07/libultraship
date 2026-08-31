@@ -101,26 +101,7 @@ void Gui::OnInit(const nlohmann::json& initArgs) {
     // -> fuzzy text. Compute the real backing scale (physical px / logical pt) from the window and use
     // it as ImFontConfig::RasterizerDensity so glyphs are rasterized at native density and stay crisp,
     // without changing any logical sizes/metrics/layout. 1.0 on standard-DPI displays leaves it a no-op.
-    mDpiScale = 1.0f;
-    {
-        WindowBackend backend = Context::GetInstance()->GetWindow()->GetWindowBackend();
-        if (backend == WindowBackend::FAST3D_SDL_OPENGL || backend == WindowBackend::FAST3D_SDL_METAL) {
-            // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
-            auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
-            if (sdlWindow != nullptr) {
-                int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
-                SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
-#if SDL_VERSION_ATLEAST(2, 26, 0)
-                SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
-#else
-                SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
-#endif
-                if (logicalW > 0 && pixelW > 0) {
-                    mDpiScale = std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
-                }
-            }
-        }
-    }
+    mDpiScale = ComputeDpiScale();
 
     // Add Font Awesome and merge it into the default font.
     ImFontConfig defaultFontCfg;
@@ -178,6 +159,10 @@ void Gui::OnInit(const nlohmann::json& initArgs) {
 }
 
 void Gui::ImGuiWMInit() {
+}
+
+float Gui::ComputeDpiScale() {
+    return 1.0f;
 }
 
 void Gui::ShutDownImGui(Ship::Window* window) {

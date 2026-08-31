@@ -1,5 +1,7 @@
 #include "fast/Fast3dGui.h"
 
+#include <algorithm>
+
 #include "fast/Fast3dWindow.h"
 #include "ship/Context.h"
 #include "ship/config/ConsoleVariable.h"
@@ -61,6 +63,31 @@ void Fast3dGui::Init(GuiWindowInitData windowImpl) {
     mConsoleVariables = RequireDependency(context->GetChildren().GetFirst<Ship::ConsoleVariable>(), "ConsoleVariable");
     mResourceManager = RequireDependency(context->GetChildren().GetFirst<Ship::ResourceManager>(), "ResourceManager");
     Gui::OnInit({});
+}
+
+float Fast3dGui::ComputeDpiScale() {
+#if !defined(__APPLE__) || defined(__IOS__)
+    // Only macOS separates logical points from physical pixels here; every other
+    // platform (iOS included, which runs ImGui in pixel space) keeps a scale of 1.
+    return 1.0f;
+#else
+    // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
+    auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+    if (sdlWindow == nullptr) {
+        return 1.0f;
+    }
+    int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+    SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
+#else
+    SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
+#endif
+    if (logicalW > 0 && pixelW > 0) {
+        return std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
+    }
+    return 1.0f;
+#endif
 }
 
 bool Fast3dGui::SupportsViewports() {
@@ -420,8 +447,21 @@ void Fast3dGui::CalculateGameViewport() {
     mainPos.x -= mTemporaryWindowPos.x;
     mainPos.y -= mTemporaryWindowPos.y;
     ImVec2 size = ImGui::GetContentRegionAvail();
-    mInterpreter.lock()->mCurDimensions.width = (uint32_t)(size.x * mInterpreter.lock()->mCurDimensions.internal_mul);
-    mInterpreter.lock()->mCurDimensions.height = (uint32_t)(size.y * mInterpreter.lock()->mCurDimensions.internal_mul);
+    // macOS: ImGui coordinates are logical points while the framebuffer is physical
+    // pixels, so scale the internal render size by the display backing scale (100%
+    // internal resolution = true native pixels; no-op on standard-DPI displays).
+    // The viewport rectangle stays in points, matching the point-based window
+    // geometry. Windows/Linux already report pixels, and the iOS path keeps its
+    // pixel-based window dimensions, so the scale is 1 there.
+#if defined(__APPLE__) && !defined(__IOS__)
+    const float dpiScale = GetDpiScale();
+#else
+    const float dpiScale = 1.0f;
+#endif
+    mInterpreter.lock()->mCurDimensions.width =
+        (uint32_t)(size.x * dpiScale * mInterpreter.lock()->mCurDimensions.internal_mul);
+    mInterpreter.lock()->mCurDimensions.height =
+        (uint32_t)(size.y * dpiScale * mInterpreter.lock()->mCurDimensions.internal_mul);
     mInterpreter.lock()->mGameWindowViewport.x = (int16_t)mainPos.x;
     mInterpreter.lock()->mGameWindowViewport.y = (int16_t)mainPos.y;
     mInterpreter.lock()->mGameWindowViewport.width = (int16_t)size.x;
