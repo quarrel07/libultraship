@@ -15,17 +15,32 @@ void MouseStateManager::StartFrame() {
 }
 
 void MouseStateManager::CursorVisibilityTimeoutTick() {
+    static Coords sPrevMousePos;
+
     std::shared_ptr<Window> wnd = Context::GetInstance()->GetWindow();
-    if (wnd->IsMouseCaptured()) {
+    if (ShouldForceCursorVisibility() || wnd->IsMouseCaptured()) {
         return;
     }
 
-    // The OS cursor exists only while there is something to point at: the port menu or
-    // menu bar, or when the user forces it via the "Cursor Always Visible" setting.
-    // During normal play it stays hidden, even when the mouse moves — the game renders
-    // its own hand cursor where pointing is part of the game (e.g. the file select).
-    bool shouldShow = ShouldForceCursorVisibility() || wnd->GetGui()->GetMenuOrMenubarVisible();
-    wnd->SetCursorVisibility(shouldShow);
+    Coords mousePos = wnd->GetMousePos();
+    bool mouseMoved = abs(mousePos.x - sPrevMousePos.x) > 0 || abs(mousePos.y - sPrevMousePos.y) > 0;
+    sPrevMousePos = mousePos;
+
+    if (mouseMoved) {
+        wnd->SetCursorVisibility(true);
+        ResetCursorVisibilityTimer();
+        return;
+    }
+
+    if (mCursorVisibleTicksCounter == 0) {
+        wnd->SetCursorVisibility(false);
+        mCursorVisibleTicksCounter = -1;
+        return;
+    }
+
+    if (mCursorVisibleTicksCounter > 0) {
+        mCursorVisibleTicksCounter--;
+    }
 }
 
 bool MouseStateManager::ShouldAutoCaptureMouse() {
