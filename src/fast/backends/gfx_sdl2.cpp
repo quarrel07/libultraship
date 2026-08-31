@@ -487,7 +487,9 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
             SetFullscreenImpl(true, false);
         }
 
-        SDL_GetRendererOutputSize(mRenderer, &mWindowWidth, &mWindowHeight);
+        // Window geometry is logical points on macOS (Metal included); the pixel-density
+        // scale is applied where the internal render size is computed.
+        SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
         window_impl.Metal = { mWnd, mRenderer };
     }
 
@@ -578,12 +580,9 @@ void GfxWindowBackendSDL2::SetMouseCallbacks(bool (*onMouseButtonDown)(int btn),
 
 void GfxWindowBackendSDL2::GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) {
 #ifdef __APPLE__
-    if (mRenderer != nullptr) {
-        // Metal: drawable pixels, not window points.
-        SDL_GetRendererOutputSize(mRenderer, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
-    } else {
-        SDL_GetWindowSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
-    }
+    // Window geometry is logical points on macOS, for Metal and OpenGL alike; the
+    // pixel-density scale is applied where the internal render size is computed.
+    SDL_GetWindowSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
 #else
     SDL_GL_GetDrawableSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
 #endif
@@ -697,12 +696,9 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
             switch (event.window.event) {
                 case SDL_WINDOWEVENT_SIZE_CHANGED:
 #ifdef __APPLE__
-                    if (mRenderer != nullptr) {
-                        // Metal: drawable pixels, not window points.
-                        SDL_GetRendererOutputSize(mRenderer, &mWindowWidth, &mWindowHeight);
-                    } else {
-                        SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
-                    }
+                    // Window geometry is logical points on macOS, for Metal and OpenGL alike; the
+                    // pixel-density scale is applied where the internal render size is computed.
+                    SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
 #else
                     SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
 #endif

@@ -198,6 +198,9 @@ class Gui {
      *  The base implementation is a no-op. */
     virtual void ImGuiWMNewFrame();
 
+    /** @brief Backing scale (physical px per logical pt) for the platform window; 1.0 in the base. */
+    virtual float ComputeDpiScale();
+
     /** @brief Initialises the platform/window-manager ImGui backend.
      *  The base implementation is a no-op. */
     virtual void ImGuiWMInit();

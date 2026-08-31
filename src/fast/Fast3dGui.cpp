@@ -1,5 +1,7 @@
 #include "fast/Fast3dGui.h"
 
+#include <algorithm>
+
 #include "fast/Fast3dWindow.h"
 #include "ship/Context.h"
 #include "ship/config/ConsoleVariable.h"
@@ -51,6 +53,25 @@ Fast3dGui::Fast3dGui(std::vector<std::shared_ptr<Ship::GuiWindow>> guiWindows) :
 void Fast3dGui::Init(GuiWindowInitData windowImpl) {
     mImpl = windowImpl;
     Gui::Init();
+}
+
+float Fast3dGui::ComputeDpiScale() {
+    // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
+    auto* sdlWindow = static_cast<SDL_Window*>(mImpl.Opengl.Window);
+    if (sdlWindow == nullptr) {
+        return 1.0f;
+    }
+    int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+    SDL_GetWindowSize(sdlWindow, &logicalW, &logicalH);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    SDL_GetWindowSizeInPixels(sdlWindow, &pixelW, &pixelH);
+#else
+    SDL_GL_GetDrawableSize(sdlWindow, &pixelW, &pixelH);
+#endif
+    if (logicalW > 0 && pixelW > 0) {
+        return std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
+    }
+    return 1.0f;
 }
 
 bool Fast3dGui::SupportsViewports() {
@@ -407,8 +428,24 @@ void Fast3dGui::CalculateGameViewport() {
     mainPos.x -= mTemporaryWindowPos.x;
     mainPos.y -= mTemporaryWindowPos.y;
     ImVec2 size = ImGui::GetContentRegionAvail();
-    mInterpreter.lock()->mCurDimensions.width = (uint32_t)(size.x * mInterpreter.lock()->mCurDimensions.internal_mul);
-    mInterpreter.lock()->mCurDimensions.height = (uint32_t)(size.y * mInterpreter.lock()->mCurDimensions.internal_mul);
+    // ImGui coordinates are logical points, but the render framebuffer is measured
+    // in physical pixels. Scale the internal render size by the display backing
+    // scale so a 100% internal resolution means the display's true pixels instead
+    // of half on Retina (no-op on standard-DPI displays, where dpiScale is 1.0).
+    // The viewport rectangle deliberately stays in points: window geometry is
+    // point-based on macOS, so at 2x the viewport correctly reads half the
+    // internal resolution.
+#ifdef __APPLE__
+    // macOS only: window geometry is points while the framebuffer is pixels.
+    // Windows/Linux report window sizes in pixels already, so scale by 1 there.
+    const float dpiScale = GetDpiScale();
+#else
+    const float dpiScale = 1.0f;
+#endif
+    mInterpreter.lock()->mCurDimensions.width =
+        (uint32_t)(size.x * dpiScale * mInterpreter.lock()->mCurDimensions.internal_mul);
+    mInterpreter.lock()->mCurDimensions.height =
+        (uint32_t)(size.y * dpiScale * mInterpreter.lock()->mCurDimensions.internal_mul);
     mInterpreter.lock()->mGameWindowViewport.x = (int16_t)mainPos.x;
     mInterpreter.lock()->mGameWindowViewport.y = (int16_t)mainPos.y;
     mInterpreter.lock()->mGameWindowViewport.width = (int16_t)size.x;
