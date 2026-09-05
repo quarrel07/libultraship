@@ -80,6 +80,9 @@ bool Fast3dGui::SupportsViewports() {
 
 void Fast3dGui::HandleWindowEvents(Fast::WindowEvent event) {
     auto window = mWindow;
+    if (window == nullptr) {
+        return;
+    }
     switch (window->GetWindowBackend()) {
         case WindowBackend::FAST3D_SDL_OPENGL:
         case WindowBackend::FAST3D_SDL_METAL:
