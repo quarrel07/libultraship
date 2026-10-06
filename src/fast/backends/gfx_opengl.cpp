@@ -397,7 +397,7 @@ std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
 #ifdef __EMSCRIPTEN__
         { "GLSL_VERSION", "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;" },
 #else
-        { "GLSL_VERSION", "#version 300 es\nprecision mediump float;" },
+        { "GLSL_VERSION", "#version 300 es\nprecision highp float;\nprecision highp int;" },
 #endif
         { "attr", "in" },
         { "opengles", true },
