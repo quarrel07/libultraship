@@ -343,8 +343,16 @@ void Fast3dGui::CalculateGameViewport() {
     mainPos.y -= mTemporaryWindowPos.y;
     ImVec2 size = ImGui::GetContentRegionAvail();
     const auto interpreter = mInterpreter.lock().get();
-    interpreter->mCurDimensions.width = (uint32_t)(size.x * mInterpreter.lock()->mCurDimensions.internal_mul);
-    interpreter->mCurDimensions.height = (uint32_t)(size.y * mInterpreter.lock()->mCurDimensions.internal_mul);
+    // macOS: ImGui coordinates are logical points while the framebuffer is physical pixels, so scale
+    // the internal render size by the display backing scale (100% internal resolution = true native
+    // pixels). The viewport rectangle stays in points. Other platforms report pixels already.
+#if defined(__APPLE__) && !defined(__IOS__)
+    const float dpiScale = GetDpiScale();
+#else
+    const float dpiScale = 1.0f;
+#endif
+    interpreter->mCurDimensions.width = (uint32_t)(size.x * dpiScale * interpreter->mCurDimensions.internal_mul);
+    interpreter->mCurDimensions.height = (uint32_t)(size.y * dpiScale * interpreter->mCurDimensions.internal_mul);
     interpreter->mGameWindowViewport.x = (int16_t)mainPos.x;
     interpreter->mGameWindowViewport.y = (int16_t)mainPos.y;
     interpreter->mGameWindowViewport.width = (int16_t)size.x;
