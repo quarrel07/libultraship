@@ -79,6 +79,11 @@ class GfxRenderingAPI {
     virtual void SetSrgbMode() = 0;
     virtual ImTextureID GetTextureById(int id) = 0;
     virtual void SetCurrentPrimDepth(float depth) = 0;
+    // Optional final pass over the finished game image before the GUI draws it (e.g. auto-HDR).
+    // Backends without one return the input unchanged.
+    virtual void* PostProcessGameImage(void* gameImage) {
+        return gameImage;
+    }
 
   protected:
     int8_t mCurrentDepthTest = 0;
