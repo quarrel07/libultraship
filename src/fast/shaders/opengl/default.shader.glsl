@@ -281,9 +281,9 @@
             @if(o_invisible)
                 texel.a = 0.0;
             @end
-            @{vOutColor} = texel;
+            @{vOutColor} = clamp(texel, 0.0, 1.0);
         @else
-            @{vOutColor} = vec4(texel, 1.0);
+            @{vOutColor} = vec4(clamp(texel, 0.0, 1.0), 1.0);
         @end
 
         @if(srgb_mode)

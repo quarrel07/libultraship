@@ -748,6 +748,89 @@ void GfxRenderingAPIOGL::OnResize() {
 
 void GfxRenderingAPIOGL::StartFrame() {
     mFrameCount++;
+    ApplyColorSettings();
+}
+
+void GfxRenderingAPIOGL::AllocateColorBuffer(FramebufferOGL& fb, uint32_t width, uint32_t height,
+                                             uint32_t msaa_level) {
+    // RGBA16F rather than RGB16F because only the former is guaranteed to be renderable. The alpha channel is
+    // forced to read as 1 so the game image stays opaque when it is drawn into the window, as with RGB8.
+    GLint internal_format = mHighPrecision ? GL_RGBA16F : GL_RGB8;
+    if (msaa_level <= 1) {
+        glBindTexture(GL_TEXTURE_2D, fb.clrbuf);
+        if (mHighPrecision) {
+            glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, mHighPrecision ? GL_ONE : GL_ALPHA);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb.clrbuf, 0);
+    } else {
+        glBindRenderbuffer(GL_RENDERBUFFER, fb.clrbufMsaa);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, msaa_level, internal_format, width, height);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, fb.clrbufMsaa);
+    }
+    fb.highPrecision = mHighPrecision;
+}
+
+void GfxRenderingAPIOGL::ApplyColorSettings() {
+#ifdef USE_OPENGLES
+    // Rendering to RGBA16F needs EXT_color_buffer_float on GLES; keep 8-bit there.
+    bool high_precision = false;
+#else
+    bool high_precision =
+        !mSrgbMode && Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gHdr.HighPrecision", 0);
+#endif
+    if (high_precision == mHighPrecision) {
+        return;
+    }
+    mHighPrecision = high_precision;
+
+    if (mLastScissorEnabled != 0) {
+        mLastScissorEnabled = 0;
+        glDisable(GL_SCISSOR_TEST);
+    }
+
+    // Rebuild every game image in the new format. Single-sample images keep their contents (e.g. the frozen
+    // pause-menu background) by round-tripping through a temporary RGBA16F copy, which holds 8-bit losslessly.
+    GLuint tmp_tex = 0, tmp_fbo = 0;
+    glGenTextures(1, &tmp_tex);
+    glGenFramebuffers(1, &tmp_fbo);
+    for (size_t fb_id = 1; fb_id < mFrameBuffers.size(); fb_id++) {
+        FramebufferOGL& fb = mFrameBuffers[fb_id];
+        if (fb.width == 0 || fb.height == 0) {
+            continue;
+        }
+        bool keep_contents = fb.msaa_level <= 1;
+        if (keep_contents) {
+            glBindTexture(GL_TEXTURE_2D, tmp_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, fb.width, fb.height, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, tmp_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tmp_tex, 0);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.fbo);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, tmp_fbo);
+            glBlitFramebuffer(0, 0, fb.width, fb.height, 0, 0, fb.width, fb.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
+        AllocateColorBuffer(fb, fb.width, fb.height, fb.msaa_level);
+
+        if (keep_contents) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, tmp_fbo);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb.fbo);
+            glBlitFramebuffer(0, 0, fb.width, fb.height, 0, 0, fb.width, fb.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+    }
+    glDeleteFramebuffers(1, &tmp_fbo);
+    glDeleteTextures(1, &tmp_tex);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[mCurrentFrameBuffer].fbo);
+    glReadBuffer(GL_BACK);
 }
 
 void GfxRenderingAPIOGL::EndFrame() {
@@ -801,18 +884,9 @@ void GfxRenderingAPIOGL::UpdateFramebufferParameters(int fb_id, uint32_t width, 
     glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
 
     if (fb_id != 0) {
-        if (fb.width != width || fb.height != height || fb.msaa_level != msaa_level) {
-            if (msaa_level <= 1) {
-                glBindTexture(GL_TEXTURE_2D, fb.clrbuf);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb.clrbuf, 0);
-            } else {
-                glBindRenderbuffer(GL_RENDERBUFFER, fb.clrbufMsaa);
-                glRenderbufferStorageMultisample(GL_RENDERBUFFER, msaa_level, GL_RGB8, width, height);
-                glBindRenderbuffer(GL_RENDERBUFFER, 0);
-                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, fb.clrbufMsaa);
-            }
+        if (fb.width != width || fb.height != height || fb.msaa_level != msaa_level ||
+            fb.highPrecision != mHighPrecision) {
+            AllocateColorBuffer(fb, width, height, msaa_level);
         }
 
         if (has_depth_buffer &&

@@ -46,6 +46,7 @@ struct FramebufferOGL {
     bool has_depth_buffer;
     uint32_t msaa_level;
     bool invertY;
+    bool highPrecision = false; // color buffer is RGBA16F rather than RGB8
 
     GLuint fbo, clrbuf, clrbufMsaa, rbo;
 };
@@ -107,6 +108,8 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 
   private:
     void SetUniforms(ShaderProgram* prg) const;
+    void ApplyColorSettings();
+    void AllocateColorBuffer(FramebufferOGL& fb, uint32_t width, uint32_t height, uint32_t msaa_level);
     std::string BuildFsShader(const CCFeatures& cc_features);
     void SetPerDrawUniforms();
 
@@ -128,6 +131,9 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 #endif
 
     uint32_t mFrameCount = 0;
+    // 16-bit color experiment (gHdr.HighPrecision): game images use RGBA16F so blending and fog keep more than
+    // 8 bits of precision. The window itself stays 8-bit on OpenGL.
+    bool mHighPrecision = false;
 
     std::vector<FramebufferOGL> mFrameBuffers;
     size_t mCurrentFrameBuffer = 0;
