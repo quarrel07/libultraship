@@ -558,9 +558,9 @@ fragment FragOut fragmentShader(
         @if(o_invisible)
             texel.w = 0.0;
         @end
-        out.color = texel;
+        out.color = saturate(texel);
     @else
-        out.color = float4(texel, 1.0);
+        out.color = float4(saturate(texel), 1.0);
     @end
     @if(o_prim_depth)
         out.depth = drawUniforms.prim_depth;

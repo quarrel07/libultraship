@@ -210,6 +210,11 @@ class GfxRenderingAPI {
     virtual void SetCullMode(int8_t keepSign) {
         mCurrentCullKeepSign = keepSign;
     }
+    // Optional final pass over the finished game image before the GUI draws it (e.g. auto-HDR).
+    // Backends without one return the input unchanged.
+    virtual void* PostProcessGameImage(void* gameImage) {
+        return gameImage;
+    }
 
   protected:
     int8_t mCurrentDepthTest = 0;

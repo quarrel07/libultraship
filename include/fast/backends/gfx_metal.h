@@ -36,6 +36,7 @@ class Device;
 class Function;
 class Buffer;
 class RenderPipelineState;
+class RenderPipelineDescriptor;
 class ComputePipelineState;
 class CommandQueue;
 class Viewport;
@@ -75,8 +76,10 @@ struct ShaderProgramMetal {
     bool usedLighting = false;
     bool markedForDeletion = false;
 
-    // hashed by msaa_level
+    // hashed by msaa_level; one set per color attachment format (8-bit and 16-bit float), built on demand
     MTL::RenderPipelineState* pipeline_state_variants[9];
+    MTL::RenderPipelineState* pipeline_state_variants_f16[9];
+    MTL::RenderPipelineDescriptor* pipeline_descriptor;
 };
 
 struct TextureDataMetal {
@@ -203,6 +206,7 @@ class GfxRenderingAPIMetal final : public GfxRenderingAPI {
     void SetTextureFilter(FilteringMode mode) override;
     FilteringMode GetTextureFilter() override;
     ImTextureID GetTextureById(int id) override;
+    void* PostProcessGameImage(void* gameImage) override;
 
     void NewFrame();
     void SetupFloatingFrame();
@@ -212,6 +216,9 @@ class GfxRenderingAPIMetal final : public GfxRenderingAPI {
   private:
     bool NonUniformThreadGroupSupported();
     void SetupScreenFramebuffer(uint32_t width, uint32_t height);
+    void ApplyColorSettings();
+    void CopyIntoNewFormat(std::vector<std::pair<MTL::Texture*, MTL::Texture*>>& copies);
+    MTL::RenderPipelineState* GetPipelineState(ShaderProgramMetal* prg, bool f16, uint32_t msaa_level);
     // Elements that only need to be setup once
     SDL_Renderer* mRenderer = nullptr;
     CA::MetalLayer* mLayer = nullptr; // CA::MetalLayer*
@@ -272,6 +279,18 @@ class GfxRenderingAPIMetal final : public GfxRenderingAPI {
     bool mLodMaxDirty = true;
 
     bool mNonUniformThreadgroupSupported = false;
+
+    // macOS HDR experiment: 16-bit float game images + extended-range (EDR) window, and an optional auto-HDR pass
+    // over the finished game image. Colors stay in their usual display encoding throughout, so 16-bit only adds
+    // precision; values above 1.0 are brighter than SDR white on an EDR-capable display.
+    bool mHighPrecision = false; // true: RGBA16Float color targets, false: BGRA8Unorm
+    bool mAutoHdr = false;
+    float mEdrHeadroom = 1.0f;
+    int mEdrHeadroomPollFrames = 0;
+    bool mScreenReadbackIsHalf = false;
+    MTL::Texture* mAutoHdrTexture = nullptr;
+    MTL::RenderPipelineState* mAutoHdrPipeline = nullptr;
+    MTL::RenderPipelineState* mFormatCopyPipelines[2] = { nullptr, nullptr }; // [0] 8-bit target, [1] 16-bit target
 };
 
 } // namespace Fast

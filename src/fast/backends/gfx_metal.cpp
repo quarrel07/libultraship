@@ -38,6 +38,138 @@
 #include "ship/config/ConsoleVariable.h"
 #include "ship/resource/ResourceManager.h"
 
+#include <objc/message.h>
+#include <objc/runtime.h>
+#include <CoreGraphics/CoreGraphics.h>
+
+// macOS HDR experiment settings (see GfxRenderingAPIMetal::ApplyColorSettings).
+#define CVAR_HDR_HIGH_PRECISION "gHdr.HighPrecision"
+#define CVAR_HDR_AUTO "gHdr.AutoHdr"
+#define CVAR_HDR_AUTO_PEAK "gHdr.AutoHdrPeak"
+#define CVAR_HDR_AUTO_SHOULDER_START "gHdr.AutoHdrShoulderStart"
+#define CVAR_HDR_AUTO_SHOULDER_POW "gHdr.AutoHdrShoulderPow"
+#define CVAR_HDR_HEADROOM_READOUT "gHdr.Internal.Headroom"
+
+namespace {
+// CAMetalLayer's colorspace and EDR switches are not wrapped by metal-cpp, so set them through the ObjC runtime.
+void SetLayerExtendedRange(CA::MetalLayer* layer, bool extended) {
+    CGColorSpaceRef colorspace = extended ? CGColorSpaceCreateWithName(kCGColorSpaceExtendedSRGB) : nullptr;
+    ((void (*)(id, SEL, CGColorSpaceRef))objc_msgSend)((id)layer, sel_registerName("setColorspace:"), colorspace);
+    if (colorspace != nullptr) {
+        CGColorSpaceRelease(colorspace);
+    }
+    ((void (*)(id, SEL, BOOL))objc_msgSend)((id)layer, sel_registerName("setWantsExtendedDynamicRangeContent:"),
+                                            extended ? YES : NO);
+}
+
+// How many times brighter than SDR white the main display can show right now (1.0 = no HDR headroom).
+// Changes with the brightness setting, so it is polled rather than read once.
+float QueryEdrHeadroom() {
+    id screen = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSScreen"), sel_registerName("mainScreen"));
+    if (screen == nullptr) {
+        return 1.0f;
+    }
+    double headroom = ((double (*)(id, SEL))objc_msgSend)(
+        screen, sel_registerName("maximumExtendedDynamicRangeColorComponentValue"));
+    return headroom > 1.0 ? (float)headroom : 1.0f;
+}
+
+MTL::PixelFormat ColorFormat(bool high_precision) {
+    return high_precision ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatBGRA8Unorm;
+}
+
+float HalfToFloat(uint16_t h) {
+    uint32_t sign = (uint32_t)(h >> 15) << 31;
+    uint32_t exponent = (h >> 10) & 0x1F;
+    uint32_t mantissa = h & 0x3FF;
+    uint32_t bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            exponent = 113;
+            while ((mantissa & 0x400) == 0) {
+                mantissa <<= 1;
+                exponent--;
+            }
+            bits = sign | (exponent << 23) | ((mantissa & 0x3FF) << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7F800000 | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    }
+    float f;
+    memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+uint32_t UnitToFiveBits(float v) {
+    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    return (uint32_t)(v * 255.0f) >> 3;
+}
+
+// Copies one image into another of the same size but a different color format, pixel for pixel. Used when the
+// 16-bit setting flips so images that persist across frames (e.g. the frozen pause-menu background) keep their
+// contents instead of going blank.
+const char* kFormatCopyShader = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+vertex float4 formatCopyVertex(uint vid [[vertex_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2);
+    return float4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+fragment float4 formatCopyFragment(float4 pos [[position]], texture2d<float, access::read> src [[texture(0)]]) {
+    return src.read(uint2(pos.xy));
+}
+)";
+
+// Auto-HDR after Filippo Tarpini's (Filoppi) PumboAutoHDR and his Dolphin port (Data/Sys/Shaders/AutoHDR.glsl):
+// leave darker colors alone and push the brightest ones past SDR white along a curve, up to `peak` times SDR white.
+// Works in linear light on the game image's display-encoded colors and writes extended sRGB, matching the window's
+// extended sRGB colorspace.
+const char* kAutoHdrShader = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VOut { float4 pos [[position]]; float2 uv; };
+struct AutoHdrParams { float peak; float shoulderStart; float shoulderPow; float pad; };
+
+vertex VOut autoHdrVertex(uint vid [[vertex_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2);
+    VOut o;
+    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = float2(p.x, 1.0 - p.y);
+    return o;
+}
+
+static float3 srgbToLinear(float3 c) {
+    float3 a = abs(c);
+    return sign(c) * select(pow((a + 0.055) / 1.055, 2.4), a / 12.92, a <= 0.04045);
+}
+static float3 linearToSrgb(float3 c) {
+    float3 a = abs(c);
+    return sign(c) * select(1.055 * pow(a, 1.0 / 2.4) - 0.055, a * 12.92, a <= 0.0031308);
+}
+
+fragment float4 autoHdrFragment(VOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                                constant AutoHdrParams& p [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
+    float4 c = src.sample(s, in.uv);
+    float3 lin = srgbToLinear(saturate(c.rgb));
+    float y = dot(lin, float3(0.2126, 0.7152, 0.0722));
+    if (p.peak > 1.0 && y > 0.0 && y > p.shoulderStart && p.shoulderStart < 1.0) {
+        float shoulder = 1.0 - (max(1.0 - y, 0.0) / (1.0 - p.shoulderStart));
+        float extra = pow(shoulder, p.shoulderPow) * (p.peak - 1.0);
+        lin *= (y + extra) / y;
+    }
+    return float4(linearToSrgb(lin), c.a);
+}
+)";
+} // namespace
+
 #define ARRAY_COUNT(arr) (int32_t)(sizeof(arr) / sizeof(arr[0]))
 
 // MARK: - Helpers
@@ -64,6 +196,55 @@ static MTL::SamplerAddressMode gfx_cm_to_metal(uint32_t val) {
 }
 
 // MARK: - ImGui & SDL Wrappers
+
+void GfxRenderingAPIMetal::CopyIntoNewFormat(std::vector<std::pair<MTL::Texture*, MTL::Texture*>>& copies) {
+    if (copies.empty()) {
+        return;
+    }
+    int slot = mHighPrecision ? 1 : 0;
+    if (mFormatCopyPipelines[slot] == nullptr) {
+        NS::Error* error = nullptr;
+        MTL::Library* library =
+            mDevice->newLibrary(NS::String::string(kFormatCopyShader, NS::UTF8StringEncoding), nullptr, &error);
+        if (library != nullptr) {
+            MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+            MTL::Function* vs = library->newFunction(NS::String::string("formatCopyVertex", NS::UTF8StringEncoding));
+            MTL::Function* fs =
+                library->newFunction(NS::String::string("formatCopyFragment", NS::UTF8StringEncoding));
+            desc->setVertexFunction(vs);
+            desc->setFragmentFunction(fs);
+            desc->colorAttachments()->object(0)->setPixelFormat(ColorFormat(mHighPrecision));
+            mFormatCopyPipelines[slot] = mDevice->newRenderPipelineState(desc, &error);
+            vs->release();
+            fs->release();
+            desc->release();
+            library->release();
+        }
+        if (mFormatCopyPipelines[slot] == nullptr) {
+            SPDLOG_ERROR("Failed to create the format copy pipeline; persistent images restart blank");
+        }
+    }
+
+    // Committed before this frame's command buffers exist, so the copies land before anything reads them.
+    // The command buffer keeps the old textures alive until it has run.
+    MTL::CommandBuffer* command_buffer = mCommandQueue->commandBuffer();
+    for (auto& [old_texture, new_texture] : copies) {
+        if (mFormatCopyPipelines[slot] != nullptr) {
+            MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::renderPassDescriptor();
+            pass->colorAttachments()->object(0)->setTexture(new_texture);
+            pass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionDontCare);
+            pass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+            MTL::RenderCommandEncoder* encoder = command_buffer->renderCommandEncoder(pass);
+            encoder->setRenderPipelineState(mFormatCopyPipelines[slot]);
+            encoder->setFragmentTexture(old_texture, 0);
+            encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+            encoder->endEncoding();
+        }
+        old_texture->release();
+    }
+    command_buffer->commit();
+    copies.clear();
+}
 
 bool GfxRenderingAPIMetal::NonUniformThreadGroupSupported() {
 #ifdef __IOS__
@@ -101,6 +282,8 @@ bool GfxRenderingAPIMetal::MetalInit(SDL_Renderer* renderer) {
 static void SetupScreenFramebuffer(uint32_t width, uint32_t height);
 
 void GfxRenderingAPIMetal::NewFrame() {
+    ApplyColorSettings();
+
     int width, height;
     SDL_GetRendererOutputSize(mRenderer, &width, &height);
     SetupScreenFramebuffer(width, height);
@@ -259,7 +442,7 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
     pipeline_descriptor->setFragmentFunction(fragmentFunc);
     pipeline_descriptor->setVertexDescriptor(vertex_descriptor);
 
-    pipeline_descriptor->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    pipeline_descriptor->colorAttachments()->object(0)->setPixelFormat(ColorFormat(mHighPrecision));
     pipeline_descriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
     if (cc_features.opt_alpha) {
         pipeline_descriptor->colorAttachments()->object(0)->setBlendingEnabled(true);
@@ -306,7 +489,11 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
                              error->localizedDescription()->cString(NS::UTF8StringEncoding));
             }
 
-            prg->pipeline_state_variants[msaa_level] = pipeline_state;
+            if (mHighPrecision) {
+                prg->pipeline_state_variants_f16[msaa_level] = pipeline_state;
+            } else {
+                prg->pipeline_state_variants[msaa_level] = pipeline_state;
+            }
         }
     }
 
@@ -315,7 +502,8 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
     vertexFunc->release();
     fragmentFunc->release();
     library->release();
-    pipeline_descriptor->release();
+    // Kept so the other color format's pipelines can be built when the 16-bit setting is toggled.
+    prg->pipeline_descriptor = pipeline_descriptor;
     autorelease_pool->release();
 
     return (struct ShaderProgram*)prg;
@@ -699,7 +887,10 @@ void GfxRenderingAPIMetal::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, si
         current_framebuffer.mLastShaderProgram = mShaderProgram;
 
         MTL::RenderPipelineState* pipeline_state =
-            mShaderProgram->pipeline_state_variants[current_framebuffer.mMsaaLevel];
+            GetPipelineState(mShaderProgram,
+                             mTextures[current_framebuffer.mTextureId].texture->pixelFormat() ==
+                                 MTL::PixelFormatRGBA16Float,
+                             current_framebuffer.mMsaaLevel);
         current_framebuffer.mCommandEncoder->setRenderPipelineState(pipeline_state);
     }
 
@@ -773,7 +964,8 @@ void GfxRenderingAPIMetal::EndFrame() {
         MTL::Texture* screenTex = mTextures[screen_framebuffer.mTextureId].texture;
         uint32_t w = mScreenReadbackWidth;
         uint32_t h = mScreenReadbackHeight;
-        size_t bytesPerRow = w * 4; // BGRA8 = 4 bytes per pixel
+        mScreenReadbackIsHalf = screenTex->pixelFormat() == MTL::PixelFormatRGBA16Float;
+        size_t bytesPerRow = w * (mScreenReadbackIsHalf ? 8 : 4); // RGBA16F = 8 bytes, BGRA8 = 4 bytes per pixel
         size_t bufSize = bytesPerRow * h;
 
         // Allocate / reuse a persistent shared buffer for CPU readback.
@@ -960,17 +1152,19 @@ void GfxRenderingAPIMetal::UpdateFramebufferParameters(int fb_id, uint32_t width
     }
 
     bool diff = tex.width != width || tex.height != height || fb.mMsaaLevel != msaa_level;
+    bool format_changed =
+        tex.texture != nullptr && tex.texture->pixelFormat() != ColorFormat(mHighPrecision);
 
     NS::AutoreleasePool* autorelease_pool = NS::AutoreleasePool::alloc()->init();
 
-    if (diff || (fb.mRenderPassDescriptor != nullptr) != render_target) {
+    if (diff || format_changed || (fb.mRenderPassDescriptor != nullptr) != render_target) {
         MTL::TextureDescriptor* tex_descriptor = MTL::TextureDescriptor::alloc()->init();
         tex_descriptor->setTextureType(MTL::TextureType2D);
         tex_descriptor->setWidth(width);
         tex_descriptor->setHeight(height);
         tex_descriptor->setSampleCount(1);
         tex_descriptor->setMipmapLevelCount(1);
-        tex_descriptor->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+        tex_descriptor->setPixelFormat(ColorFormat(mHighPrecision));
         tex_descriptor->setUsage((render_target ? MTL::TextureUsageRenderTarget : 0) | MTL::TextureUsageShaderRead);
 
         if (tex.texture != nullptr)
@@ -1458,6 +1652,16 @@ void GfxRenderingAPIMetal::ReadFramebufferToCPU(int fb_id, uint32_t width, uint3
 
             uint8_t* bgra = (uint8_t*)mScreenReadbackBuffer->contents();
             uint32_t count = mScreenReadbackWidth * mScreenReadbackHeight;
+            if (mScreenReadbackIsHalf) {
+                uint16_t* rgba = (uint16_t*)mScreenReadbackBuffer->contents();
+                for (uint32_t i = 0; i < count; i++) {
+                    rgba16_buf[i] = (UnitToFiveBits(HalfToFloat(rgba[i * 4 + 0])) << 11) |
+                                    (UnitToFiveBits(HalfToFloat(rgba[i * 4 + 1])) << 6) |
+                                    (UnitToFiveBits(HalfToFloat(rgba[i * 4 + 2])) << 1) |
+                                    (HalfToFloat(rgba[i * 4 + 3]) >= 0.5f ? 1 : 0);
+                }
+                count = 0; // already converted
+            }
             for (uint32_t i = 0; i < count; i++) {
                 uint8_t b = bgra[i * 4 + 0];
                 uint8_t g = bgra[i * 4 + 1];
@@ -1536,6 +1740,169 @@ ImTextureID GfxRenderingAPIMetal::GetTextureById(int fb_id) {
     return (void*)mTextures[fb_id].texture;
 }
 
+MTL::RenderPipelineState* GfxRenderingAPIMetal::GetPipelineState(ShaderProgramMetal* prg, bool f16,
+                                                                  uint32_t msaa_level) {
+    MTL::RenderPipelineState*& pipeline_state =
+        f16 ? prg->pipeline_state_variants_f16[msaa_level] : prg->pipeline_state_variants[msaa_level];
+    if (pipeline_state == nullptr && prg->pipeline_descriptor != nullptr) {
+        prg->pipeline_descriptor->colorAttachments()->object(0)->setPixelFormat(ColorFormat(f16));
+        prg->pipeline_descriptor->setSampleCount(msaa_level);
+        NS::Error* error = nullptr;
+        pipeline_state = mDevice->newRenderPipelineState(prg->pipeline_descriptor, &error);
+        if (!pipeline_state || error != nullptr) {
+            SPDLOG_ERROR("Failed to create pipeline state, error {}",
+                         error ? error->localizedDescription()->cString(NS::UTF8StringEncoding) : "unknown");
+        }
+    }
+    return pipeline_state;
+}
+
+void GfxRenderingAPIMetal::ApplyColorSettings() {
+    auto& cvars = mConsoleVariable;
+    bool high_precision = cvars->GetInteger(CVAR_HDR_HIGH_PRECISION, 0) != 0;
+    if (high_precision != mHighPrecision) {
+        mHighPrecision = high_precision;
+        mLayer->setPixelFormat(ColorFormat(high_precision));
+        SetLayerExtendedRange(mLayer, high_precision);
+        // Recreate every offscreen game image in the new format; the window follows on its next drawable.
+        // Drawable single-sample images get their old contents copied across, so persistent ones such as the
+        // frozen pause-menu background survive the switch.
+        std::vector<std::pair<MTL::Texture*, MTL::Texture*>> carry_over; // (old, new)
+        for (int fb_id = 1; fb_id < (int)mFramebuffers.size(); fb_id++) {
+            FramebufferMetal& fb = mFramebuffers[fb_id];
+            TextureDataMetal& tex = mTextures[fb.mTextureId];
+            if (tex.texture != nullptr) {
+                MTL::Texture* old_texture = tex.texture->retain();
+                UpdateFramebufferParameters(fb_id, tex.width, tex.height, fb.mMsaaLevel, true, fb.mRenderTarget,
+                                            fb.mHasDepthBuffer, fb.mDepthTexture != nullptr);
+                if (fb.mRenderTarget && fb.mMsaaLevel == 1 && tex.texture != old_texture &&
+                    tex.texture->width() == old_texture->width() && tex.texture->height() == old_texture->height()) {
+                    carry_over.emplace_back(old_texture, tex.texture);
+                } else {
+                    old_texture->release();
+                }
+            }
+        }
+        CopyIntoNewFormat(carry_over);
+        mEdrHeadroomPollFrames = 0;
+    }
+
+    mAutoHdr = high_precision && cvars->GetInteger(CVAR_HDR_AUTO, 0) != 0;
+
+    if (high_precision && --mEdrHeadroomPollFrames <= 0) {
+        mEdrHeadroom = QueryEdrHeadroom();
+        mEdrHeadroomPollFrames = 30;
+        cvars->SetFloat(CVAR_HDR_HEADROOM_READOUT, mEdrHeadroom);
+    } else if (!high_precision) {
+        mEdrHeadroom = 1.0f;
+    }
+}
+
+void* GfxRenderingAPIMetal::PostProcessGameImage(void* gameImage) {
+    if (!mAutoHdr || gameImage == nullptr) {
+        return gameImage;
+    }
+    auto& screen = mFramebuffers[0];
+    if (screen.mCommandBuffer == nullptr || screen.mCommandEncoder == nullptr || screen.mHasEndedEncoding) {
+        return gameImage;
+    }
+
+    MTL::Texture* source = (MTL::Texture*)gameImage;
+    if (mAutoHdrTexture == nullptr || mAutoHdrTexture->width() != source->width() ||
+        mAutoHdrTexture->height() != source->height()) {
+        if (mAutoHdrTexture != nullptr) {
+            mAutoHdrTexture->release();
+        }
+        MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+            MTL::PixelFormatRGBA16Float, source->width(), source->height(), false);
+        desc->setStorageMode(MTL::StorageModePrivate);
+        desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        mAutoHdrTexture = mDevice->newTexture(desc);
+    }
+
+    if (mAutoHdrPipeline == nullptr) {
+        NS::Error* error = nullptr;
+        MTL::Library* library =
+            mDevice->newLibrary(NS::String::string(kAutoHdrShader, NS::UTF8StringEncoding), nullptr, &error);
+        if (library == nullptr) {
+            SPDLOG_ERROR("Failed to compile auto-HDR shader: {}",
+                         error ? error->localizedDescription()->cString(NS::UTF8StringEncoding) : "unknown");
+            return gameImage;
+        }
+        MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+        MTL::Function* vs = library->newFunction(NS::String::string("autoHdrVertex", NS::UTF8StringEncoding));
+        MTL::Function* fs = library->newFunction(NS::String::string("autoHdrFragment", NS::UTF8StringEncoding));
+        desc->setVertexFunction(vs);
+        desc->setFragmentFunction(fs);
+        desc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        mAutoHdrPipeline = mDevice->newRenderPipelineState(desc, &error);
+        vs->release();
+        fs->release();
+        desc->release();
+        library->release();
+        if (mAutoHdrPipeline == nullptr) {
+            SPDLOG_ERROR("Failed to create auto-HDR pipeline");
+            return gameImage;
+        }
+    }
+
+    auto& cvars = mConsoleVariable;
+    struct {
+        float peak, shoulderStart, shoulderPow, pad;
+    } params = { std::min(cvars->GetFloat(CVAR_HDR_AUTO_PEAK, 2.0f), mEdrHeadroom),
+                 cvars->GetFloat(CVAR_HDR_AUTO_SHOULDER_START, 0.0f),
+                 cvars->GetFloat(CVAR_HDR_AUTO_SHOULDER_POW, 2.5f), 0.0f };
+
+    // Encode into the window's command buffer: it runs after the game image's own command buffer and before the
+    // GUI draws, so pause the window's render pass, run the pass, and resume it keeping what was already drawn.
+    screen.mCommandEncoder->endEncoding();
+
+    MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::renderPassDescriptor();
+    pass->colorAttachments()->object(0)->setTexture(mAutoHdrTexture);
+    pass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionDontCare);
+    pass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+    MTL::RenderCommandEncoder* encoder = screen.mCommandBuffer->renderCommandEncoder(pass);
+    encoder->setLabel(NS::String::string("Auto-HDR Encoder", NS::UTF8StringEncoding));
+    encoder->setRenderPipelineState(mAutoHdrPipeline);
+    encoder->setFragmentTexture(source, 0);
+    encoder->setFragmentBytes(&params, sizeof(params), 0);
+    encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    encoder->endEncoding();
+
+    MTL::RenderPassColorAttachmentDescriptor* color = screen.mRenderPassDescriptor->colorAttachments()->object(0);
+    MTL::LoadAction color_load = color->loadAction();
+    color->setLoadAction(MTL::LoadActionLoad);
+    MTL::RenderPassDepthAttachmentDescriptor* depth = screen.mRenderPassDescriptor->depthAttachment();
+    MTL::LoadAction depth_load = depth->loadAction();
+    if (screen.mHasDepthBuffer) {
+        depth->setLoadAction(MTL::LoadActionLoad);
+    }
+    screen.mCommandEncoder = screen.mCommandBuffer->renderCommandEncoder(screen.mRenderPassDescriptor);
+    screen.mCommandEncoder->setLabel(NS::String::string("FrameBuffer 0 Command Encoder After Auto-HDR",
+                                                        NS::UTF8StringEncoding));
+    screen.mCommandEncoder->setDepthClipMode(MTL::DepthClipModeClamp);
+    color->setLoadAction(color_load);
+    if (screen.mHasDepthBuffer) {
+        depth->setLoadAction(depth_load);
+    }
+    screen.mHasBoundVertexShader = false;
+    screen.mHasBoundFragShader = false;
+    screen.mLastShaderProgram = nullptr;
+    for (int i = 0; i < SHADER_MAX_TEXTURES; i++) {
+        screen.mLastBoundTextures[i] = nullptr;
+        screen.mLastBoundSamplers[i] = nullptr;
+    }
+    screen.mLastDepthTest = -1;
+    screen.mLastDepthMask = -1;
+    screen.mLastZmodeDecal = -1;
+    screen.mLastStrictDecal = -1;
+    if (screen.mViewport->width > 0 && screen.mScissorRect->width > 0) {
+        screen.mCommandEncoder->setViewport(*screen.mViewport);
+        screen.mCommandEncoder->setScissorRect(*screen.mScissorRect);
+    }
+
+    return mAutoHdrTexture;
+}
 } // namespace Fast
 
 bool Metal_IsSupported() {
