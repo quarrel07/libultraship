@@ -433,7 +433,13 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
             SetFullscreenImpl(true, false);
         }
 
+#if defined(__IOS__)
         SDL_GetRendererOutputSize(mRenderer, &mWindowWidth, &mWindowHeight);
+#else
+        // macOS: window geometry is logical points (Metal included), matching GetDimensions() and
+        // resize events; the pixel-density scale is applied where the internal render size is computed.
+        SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
+#endif
         window_impl.Metal = { mWnd, mRenderer };
         window_impl.Backend = WindowBackend::FAST3D_SDL_METAL;
     }
