@@ -15,6 +15,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <DirectXPackedVector.h>
+#include <dxgi1_6.h>
 
 #ifndef _LANGUAGE_C
 #define _LANGUAGE_C
@@ -834,51 +835,380 @@ bool GfxRenderingAPIDX11::WantsGameImage() {
     return mHighPrecision;
 }
 
-// Copies an image into a same-sized one of another color format, pixel for pixel (CopyResource needs matching
-// formats). Used when the 16-bit setting flips so persistent images such as the frozen pause background survive.
-void GfxRenderingAPIDX11::CopyIntoNewFormat(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target,
-                                            uint32_t width, uint32_t height) {
-    if (mFormatCopyVs == nullptr || mFormatCopyPs == nullptr) {
-        static const char* kSource = "Texture2D<float4> src : register(t0);\n"
-                                     "float4 VSMain(uint id : SV_VertexID) : SV_Position {\n"
-                                     "    float2 p = float2((id << 1) & 2, id & 2);\n"
-                                     "    return float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
-                                     "}\n"
-                                     "float4 PSMain(float4 pos : SV_Position) : SV_Target {\n"
-                                     "    return src.Load(int3(pos.xy, 0));\n"
-                                     "}\n";
-        Microsoft::WRL::ComPtr<ID3DBlob> vs_blob, ps_blob, error_blob;
-        if (FAILED(mD3dCompile(kSource, strlen(kSource), nullptr, nullptr, nullptr, "VSMain", "vs_4_0", 0, 0,
-                               vs_blob.GetAddressOf(), error_blob.ReleaseAndGetAddressOf())) ||
-            FAILED(mD3dCompile(kSource, strlen(kSource), nullptr, nullptr, nullptr, "PSMain", "ps_4_0", 0, 0,
-                               ps_blob.GetAddressOf(), error_blob.ReleaseAndGetAddressOf())) ||
-            FAILED(mDevice->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr,
-                                               mFormatCopyVs.ReleaseAndGetAddressOf())) ||
-            FAILED(mDevice->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr,
-                                              mFormatCopyPs.ReleaseAndGetAddressOf()))) {
-            SPDLOG_ERROR("Failed to create the format copy shaders; persistent images restart blank");
-            mFormatCopyVs.Reset();
-            mFormatCopyPs.Reset();
-            return;
-        }
+// Full-screen passes used by 16-bit color and HDR output. All work on same-sized images, pixel for pixel.
+//  CopyPS:    copy into an image of another color format (CopyResource needs matching formats).
+//  AutoHdrPS: Auto HDR after Filippo Tarpini's (Filoppi) PumboAutoHDR and his Dolphin port: darker colors stay as
+//             they are, the brightest are pushed past SDR white along a curve, up to `peak` times SDR white.
+//  ScRgbPS:   display-encoded colors (extended sRGB) to linear scRGB, scaled so SDR white matches the desktop.
+static const char* kHdrShaderSource =
+    "Texture2D<float4> src : register(t0);\n"
+    "cbuffer HdrParams : register(b0) { float peak; float shoulderStart; float shoulderPow; float sdrWhiteScale; };\n"
+    "float4 VSMain(uint id : SV_VertexID) : SV_Position {\n"
+    "    float2 p = float2((id << 1) & 2, id & 2);\n"
+    "    return float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n"
+    "float3 SrgbToLinear(float3 c) {\n"
+    "    float3 a = abs(c);\n"
+    "    return sign(c) * (a <= 0.04045 ? a / 12.92 : pow((a + 0.055) / 1.055, 2.4));\n"
+    "}\n"
+    "float3 LinearToSrgb(float3 c) {\n"
+    "    float3 a = abs(c);\n"
+    "    return sign(c) * (a <= 0.0031308 ? a * 12.92 : 1.055 * pow(a, 1.0 / 2.4) - 0.055);\n"
+    "}\n"
+    "float4 CopyPS(float4 pos : SV_Position) : SV_Target {\n"
+    "    return src.Load(int3(pos.xy, 0));\n"
+    "}\n"
+    "float4 AutoHdrPS(float4 pos : SV_Position) : SV_Target {\n"
+    "    float4 c = src.Load(int3(pos.xy, 0));\n"
+    "    float3 lin = SrgbToLinear(saturate(c.rgb));\n"
+    "    float y = dot(lin, float3(0.2126, 0.7152, 0.0722));\n"
+    "    if (peak > 1.0 && y > 0.0 && y > shoulderStart && shoulderStart < 1.0) {\n"
+    "        float shoulder = 1.0 - (max(1.0 - y, 0.0) / (1.0 - shoulderStart));\n"
+    "        float extra = pow(shoulder, shoulderPow) * (peak - 1.0);\n"
+    "        lin *= (y + extra) / y;\n"
+    "    }\n"
+    "    return float4(LinearToSrgb(lin), c.a);\n"
+    "}\n"
+    "float4 ScRgbPS(float4 pos : SV_Position) : SV_Target {\n"
+    "    float4 c = src.Load(int3(pos.xy, 0));\n"
+    "    return float4(SrgbToLinear(c.rgb) * sdrWhiteScale, 1.0);\n"
+    "}\n";
+
+struct HdrParamsCB {
+    float peak;
+    float shoulder_start;
+    float shoulder_pow;
+    float sdr_white_scale;
+};
+
+bool GfxRenderingAPIDX11::EnsureHdrShaders() {
+    if (mFormatCopyVs != nullptr && mFormatCopyPs != nullptr && mAutoHdrPs != nullptr && mScRgbPs != nullptr &&
+        mHdrParamsCb != nullptr) {
+        return true;
+    }
+    if (mHdrShadersFailed) {
+        return false;
     }
 
+    auto compile = [this](const char* entry, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& blob) {
+        Microsoft::WRL::ComPtr<ID3DBlob> errors;
+        HRESULT hr = mD3dCompile(kHdrShaderSource, strlen(kHdrShaderSource), nullptr, nullptr, nullptr, entry, target,
+                                 0, 0, blob.ReleaseAndGetAddressOf(), errors.GetAddressOf());
+        if (FAILED(hr) && errors != nullptr) {
+            SPDLOG_ERROR("HDR shader {} failed to compile: {}", entry, (const char*)errors->GetBufferPointer());
+        }
+        return SUCCEEDED(hr);
+    };
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vs, copy_ps, auto_hdr_ps, scrgb_ps;
+    D3D11_BUFFER_DESC cb_desc = {};
+    cb_desc.ByteWidth = sizeof(HdrParamsCB);
+    cb_desc.Usage = D3D11_USAGE_DYNAMIC;
+    cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    bool ok = compile("VSMain", "vs_4_0", vs) && compile("CopyPS", "ps_4_0", copy_ps) &&
+              compile("AutoHdrPS", "ps_4_0", auto_hdr_ps) && compile("ScRgbPS", "ps_4_0", scrgb_ps) &&
+              SUCCEEDED(mDevice->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr,
+                                                    mFormatCopyVs.ReleaseAndGetAddressOf())) &&
+              SUCCEEDED(mDevice->CreatePixelShader(copy_ps->GetBufferPointer(), copy_ps->GetBufferSize(), nullptr,
+                                                   mFormatCopyPs.ReleaseAndGetAddressOf())) &&
+              SUCCEEDED(mDevice->CreatePixelShader(auto_hdr_ps->GetBufferPointer(), auto_hdr_ps->GetBufferSize(),
+                                                   nullptr, mAutoHdrPs.ReleaseAndGetAddressOf())) &&
+              SUCCEEDED(mDevice->CreatePixelShader(scrgb_ps->GetBufferPointer(), scrgb_ps->GetBufferSize(), nullptr,
+                                                   mScRgbPs.ReleaseAndGetAddressOf())) &&
+              SUCCEEDED(mDevice->CreateBuffer(&cb_desc, nullptr, mHdrParamsCb.ReleaseAndGetAddressOf()));
+    if (!ok) {
+        SPDLOG_ERROR("Failed to create the 16-bit color / HDR shaders; those features stay off");
+        mHdrShadersFailed = true;
+        mFormatCopyVs.Reset();
+        mFormatCopyPs.Reset();
+        mAutoHdrPs.Reset();
+        mScRgbPs.Reset();
+        mHdrParamsCb.Reset();
+    }
+    return ok;
+}
+
+void GfxRenderingAPIDX11::DrawFullscreen(ID3D11PixelShader* shader, ID3D11ShaderResourceView* source,
+                                         ID3D11RenderTargetView* target, uint32_t width, uint32_t height) {
     D3D11_VIEWPORT viewport = { 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
-    D3D11_RECT scissor = { 0, 0, (LONG)width, (LONG)height };
     mContext->OMSetRenderTargets(1, &target, nullptr);
     mContext->RSSetViewports(1, &viewport);
-    mContext->RSSetScissorRects(1, &scissor);
+    mContext->RSSetState(nullptr);
     mContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
     mContext->OMSetDepthStencilState(nullptr, 0);
     mContext->IASetInputLayout(nullptr);
     mContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     mContext->VSSetShader(mFormatCopyVs.Get(), nullptr, 0);
-    mContext->PSSetShader(mFormatCopyPs.Get(), nullptr, 0);
+    mContext->PSSetShader(shader, nullptr, 0);
+    mContext->PSSetConstantBuffers(0, 1, mHdrParamsCb.GetAddressOf());
     mContext->PSSetShaderResources(0, 1, &source);
     mContext->Draw(3, 0);
 
     ID3D11ShaderResourceView* no_srv = nullptr;
     mContext->PSSetShaderResources(0, 1, &no_srv);
+}
+
+// The full-screen passes change pipeline state behind the draw-state cache: make the next draw set everything
+// again, put the renderer's constant buffers back and rebind the current framebuffer.
+void GfxRenderingAPIDX11::InvalidateStateCache() {
+    mLastShaderProgram = nullptr;
+    mLastBlendState = nullptr;
+    mLastVertexBufferStride = 0;
+    mLastPrimitaveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    mLastDepthTest = -1;
+    mLastDepthMask = -1;
+    mLastZmodeDecal = -1;
+    for (int i = 0; i < SHADER_MAX_TEXTURES; i++) {
+        mLastResourceViews[i] = nullptr;
+        mLastSamplerStates[i] = nullptr;
+    }
+    ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };
+    mContext->PSSetConstantBuffers(0, 3, buffers);
+    if (mCurrentFramebuffer >= 0 && mCurrentFramebuffer < (int)mFrameBuffers.size()) {
+        FramebufferDX11& current = mFrameBuffers[mCurrentFramebuffer];
+        mContext->OMSetRenderTargets(1, current.render_target_view.GetAddressOf(),
+                                     current.has_depth_buffer ? current.depth_stencil_view.Get() : nullptr);
+    }
+}
+
+void GfxRenderingAPIDX11::CopyIntoNewFormat(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target,
+                                            uint32_t width, uint32_t height) {
+    if (EnsureHdrShaders()) {
+        DrawFullscreen(mFormatCopyPs.Get(), source, target, width, height);
+    }
+}
+
+// Switches the window between 8-bit sRGB and 16-bit scRGB. All references to the back buffer must be released
+// before ResizeBuffers can change its format.
+void GfxRenderingAPIDX11::SetSwapChainHdr(bool hdr) {
+    IDXGISwapChain1* swap_chain = mWindowBackend->GetSwapChain();
+    if (swap_chain == nullptr) {
+        return;
+    }
+    FramebufferDX11& fb0 = mFrameBuffers[0];
+    TextureData& tex0 = mTextures[fb0.texture_id];
+    mContext->OMSetRenderTargets(0, nullptr, nullptr);
+    fb0.render_target_view.Reset();
+    tex0.texture.Reset();
+    mPresentCopySrv.Reset();
+    mPresentCopy.Reset();
+    mContext->Flush();
+
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    ThrowIfFailed(swap_chain->GetDesc1(&desc));
+    if (FAILED(swap_chain->ResizeBuffers(0, 0, 0,
+                                         hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                         desc.Flags))) {
+        SPDLOG_ERROR("Could not switch the window to {} color", hdr ? "16-bit" : "8-bit");
+        hdr = false;
+        ThrowIfFailed(swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_R8G8B8A8_UNORM, desc.Flags));
+    }
+
+    // As Dolphin does: scRGB support has to be probed through HDR10 (checking scRGB itself always reports false),
+    // then the color space is set to scRGB. Fall back to 8-bit if any step fails.
+    Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain3;
+    bool color_space_ok = false;
+    if (SUCCEEDED(swap_chain->QueryInterface(IID_PPV_ARGS(swap_chain3.GetAddressOf())))) {
+        UINT support = 0;
+        if (!hdr || (SUCCEEDED(swap_chain3->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+                                                                    &support)) &&
+                     (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT))) {
+            color_space_ok = SUCCEEDED(swap_chain3->SetColorSpace1(
+                hdr ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709));
+        }
+    }
+    if (hdr && !color_space_ok) {
+        SPDLOG_WARN("HDR output not available on this system; the window stays 8-bit");
+        hdr = false;
+        ThrowIfFailed(swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_R8G8B8A8_UNORM, desc.Flags));
+        if (swap_chain3 != nullptr) {
+            swap_chain3->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        }
+    }
+    mHdrOutput = hdr;
+
+    // Recreates the back buffer view (the texture is gone, so this takes the swap-chain path).
+    UpdateFramebufferParameters(0, tex0.width, tex0.height, 1, false, true, fb0.has_depth_buffer,
+                                fb0.depth_stencil_srv != nullptr);
+}
+
+// Reads whether the window's display is in HDR mode, its peak luminance and Windows' SDR content brightness.
+void GfxRenderingAPIDX11::QueryDisplayHdr() {
+    HMONITOR monitor = MonitorFromWindow(mWindowBackend->GetWindowHandle(), MONITOR_DEFAULTTONEAREST);
+    bool hdr_display = false;
+    float peak_nits = 0.0f;
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (SUCCEEDED(mDevice.As(&dxgi_device)) && SUCCEEDED(dxgi_device->GetAdapter(adapter.GetAddressOf()))) {
+        Microsoft::WRL::ComPtr<IDXGIOutput> output;
+        for (UINT i = 0; adapter->EnumOutputs(i, output.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; i++) {
+            Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
+            DXGI_OUTPUT_DESC1 desc1;
+            if (SUCCEEDED(output.As(&output6)) && SUCCEEDED(output6->GetDesc1(&desc1)) && desc1.Monitor == monitor) {
+                hdr_display = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+                peak_nits = desc1.MaxLuminance;
+                break;
+            }
+        }
+    }
+
+    // Windows' "SDR content brightness" for this display, in nits (Windows reports it in 1/1000ths of 80 nits).
+    float sdr_white_nits = 80.0f;
+    MONITORINFOEXW monitor_info = {};
+    monitor_info.cbSize = sizeof(monitor_info);
+    if (hdr_display && GetMonitorInfoW(monitor, (LPMONITORINFO)&monitor_info)) {
+        UINT32 path_count = 0;
+        UINT32 mode_count = 0;
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) == ERROR_SUCCESS) {
+            std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+            std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+            if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(),
+                                   nullptr) == ERROR_SUCCESS) {
+                for (UINT32 i = 0; i < path_count; i++) {
+                    DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+                    source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                    source.header.size = sizeof(source);
+                    source.header.adapterId = paths[i].sourceInfo.adapterId;
+                    source.header.id = paths[i].sourceInfo.id;
+                    if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
+                        wcscmp(source.viewGdiDeviceName, monitor_info.szDevice) != 0) {
+                        continue;
+                    }
+                    // Layout of DISPLAYCONFIG_SDR_WHITE_LEVEL, declared here so older SDK targets still build.
+                    struct {
+                        DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+                        ULONG sdr_white_level;
+                    } white = {};
+                    white.header.type = (DISPLAYCONFIG_DEVICE_INFO_TYPE)11; // ..._GET_SDR_WHITE_LEVEL
+                    white.header.size = sizeof(white);
+                    white.header.adapterId = paths[i].targetInfo.adapterId;
+                    white.header.id = paths[i].targetInfo.id;
+                    if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS && white.sdr_white_level > 0) {
+                        sdr_white_nits = (float)white.sdr_white_level / 1000.0f * 80.0f;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    mSdrWhiteScale = hdr_display ? sdr_white_nits / 80.0f : 1.0f;
+    mHdrHeadroom = hdr_display && peak_nits > sdr_white_nits ? peak_nits / sdr_white_nits : 1.0f;
+    Ship::Context::GetRawInstance()->GetConsoleVariables()->SetFloat("gHdr.Internal.Headroom", mHdrHeadroom);
+}
+
+void GfxRenderingAPIDX11::ConvertBackBufferToScRgb() {
+    FramebufferDX11& fb0 = mFrameBuffers[0];
+    TextureData& tex0 = mTextures[fb0.texture_id];
+    if (tex0.texture == nullptr || fb0.render_target_view == nullptr || !EnsureHdrShaders()) {
+        return;
+    }
+    D3D11_TEXTURE2D_DESC desc;
+    tex0.texture->GetDesc(&desc);
+    if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return;
+    }
+
+    if (mPresentCopy == nullptr) {
+        D3D11_TEXTURE2D_DESC copy_desc = desc;
+        copy_desc.Usage = D3D11_USAGE_DEFAULT;
+        copy_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        copy_desc.CPUAccessFlags = 0;
+        copy_desc.MiscFlags = 0;
+        copy_desc.MipLevels = 1;
+        copy_desc.ArraySize = 1;
+        copy_desc.SampleDesc.Count = 1;
+        copy_desc.SampleDesc.Quality = 0;
+        if (FAILED(mDevice->CreateTexture2D(&copy_desc, nullptr, mPresentCopy.ReleaseAndGetAddressOf())) ||
+            FAILED(mDevice->CreateShaderResourceView(mPresentCopy.Get(), nullptr,
+                                                     mPresentCopySrv.ReleaseAndGetAddressOf()))) {
+            mPresentCopy.Reset();
+            mPresentCopySrv.Reset();
+            return;
+        }
+    } else {
+        D3D11_TEXTURE2D_DESC copy_desc;
+        mPresentCopy->GetDesc(&copy_desc);
+        if (copy_desc.Width != desc.Width || copy_desc.Height != desc.Height) {
+            mPresentCopy.Reset();
+            mPresentCopySrv.Reset();
+            ConvertBackBufferToScRgb();
+            return;
+        }
+    }
+
+    HdrParamsCB params = { 1.0f, 0.0f, 1.0f, mSdrWhiteScale };
+    D3D11_MAPPED_SUBRESOURCE ms;
+    if (FAILED(mContext->Map(mHdrParamsCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+        return;
+    }
+    memcpy(ms.pData, &params, sizeof(params));
+    mContext->Unmap(mHdrParamsCb.Get(), 0);
+
+    mContext->CopyResource(mPresentCopy.Get(), tex0.texture.Get());
+    DrawFullscreen(mScRgbPs.Get(), mPresentCopySrv.Get(), fb0.render_target_view.Get(), desc.Width, desc.Height);
+    InvalidateStateCache();
+}
+
+void* GfxRenderingAPIDX11::PostProcessGameImage(void* gameImage) {
+    auto cvars = Ship::Context::GetRawInstance()->GetConsoleVariables();
+    float peak = std::min(cvars->GetFloat("gHdr.AutoHdrPeak", 2.0f), mHdrHeadroom);
+    if (!mHdrOutput || gameImage == nullptr || !cvars->GetInteger("gHdr.AutoHdr", 0) || peak <= 1.0f ||
+        !EnsureHdrShaders()) {
+        return gameImage;
+    }
+
+    ID3D11ShaderResourceView* source = (ID3D11ShaderResourceView*)gameImage;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    source->GetResource(resource.GetAddressOf());
+    if (FAILED(resource.As(&texture))) {
+        return gameImage;
+    }
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+
+    D3D11_TEXTURE2D_DESC current = {};
+    if (mAutoHdrTexture != nullptr) {
+        mAutoHdrTexture->GetDesc(&current);
+    }
+    if (mAutoHdrTexture == nullptr || current.Width != desc.Width || current.Height != desc.Height) {
+        D3D11_TEXTURE2D_DESC out_desc = {};
+        out_desc.Width = desc.Width;
+        out_desc.Height = desc.Height;
+        out_desc.MipLevels = 1;
+        out_desc.ArraySize = 1;
+        out_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        out_desc.SampleDesc.Count = 1;
+        out_desc.Usage = D3D11_USAGE_DEFAULT;
+        out_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        mAutoHdrSrv.Reset();
+        mAutoHdrRtv.Reset();
+        if (FAILED(mDevice->CreateTexture2D(&out_desc, nullptr, mAutoHdrTexture.ReleaseAndGetAddressOf())) ||
+            FAILED(mDevice->CreateShaderResourceView(mAutoHdrTexture.Get(), nullptr, mAutoHdrSrv.GetAddressOf())) ||
+            FAILED(mDevice->CreateRenderTargetView(mAutoHdrTexture.Get(), nullptr, mAutoHdrRtv.GetAddressOf()))) {
+            mAutoHdrTexture.Reset();
+            mAutoHdrSrv.Reset();
+            mAutoHdrRtv.Reset();
+            return gameImage;
+        }
+    }
+
+    HdrParamsCB params = { peak, cvars->GetFloat("gHdr.AutoHdrShoulderStart", 0.0f),
+                           cvars->GetFloat("gHdr.AutoHdrShoulderPow", 2.5f), mSdrWhiteScale };
+    D3D11_MAPPED_SUBRESOURCE ms;
+    if (FAILED(mContext->Map(mHdrParamsCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+        return gameImage;
+    }
+    memcpy(ms.pData, &params, sizeof(params));
+    mContext->Unmap(mHdrParamsCb.Get(), 0);
+
+    DrawFullscreen(mAutoHdrPs.Get(), source, mAutoHdrRtv.Get(), desc.Width, desc.Height);
+    InvalidateStateCache();
+    return mAutoHdrSrv.Get();
 }
 
 void GfxRenderingAPIDX11::ApplyColorSettings() {
@@ -910,26 +1240,23 @@ void GfxRenderingAPIDX11::ApplyColorSettings() {
         }
     }
 
-    // The copies changed pipeline state behind the draw-state cache; make the next draw set everything again.
-    mLastShaderProgram = nullptr;
-    mLastBlendState = nullptr;
-    mLastVertexBufferStride = 0;
-    mLastPrimitaveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    mLastDepthTest = -1;
-    mLastDepthMask = -1;
-    for (int i = 0; i < SHADER_MAX_TEXTURES; i++) {
-        mLastResourceViews[i] = nullptr;
-        mLastSamplerStates[i] = nullptr;
+    // The window follows: 16-bit scRGB while 16-bit color is on (HDR-capable), 8-bit sRGB otherwise.
+    SetSwapChainHdr(mHighPrecision);
+    mHdrPollFrames = 0;
+    if (!mHdrOutput) {
+        mHdrHeadroom = 1.0f;
+        mSdrWhiteScale = 1.0f;
     }
-    if (mCurrentFramebuffer >= 0 && mCurrentFramebuffer < (int)mFrameBuffers.size()) {
-        FramebufferDX11& current = mFrameBuffers[mCurrentFramebuffer];
-        mContext->OMSetRenderTargets(1, current.render_target_view.GetAddressOf(),
-                                     current.has_depth_buffer ? current.depth_stencil_view.Get() : nullptr);
-    }
+    InvalidateStateCache();
 }
 
 void GfxRenderingAPIDX11::StartFrame() {
     ApplyColorSettings();
+    if (mHdrOutput && --mHdrPollFrames <= 0) {
+        // The display's HDR state and brightness can change at any time (settings, moving the window).
+        QueryDisplayHdr();
+        mHdrPollFrames = 60;
+    }
 
     // Set per-frame constant buffer
     ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };
@@ -943,6 +1270,9 @@ void GfxRenderingAPIDX11::StartFrame() {
 }
 
 void GfxRenderingAPIDX11::EndFrame() {
+    if (mHdrOutput) {
+        ConvertBackBufferToScRgb();
+    }
     mContext->Flush();
 }
 
@@ -1023,6 +1353,13 @@ void GfxRenderingAPIDX11::UpdateFramebufferParameters(int fb_id, uint32_t width,
                 fb.render_target_view.Reset();
                 tex.texture.Reset();
                 ThrowIfFailed(swap_chain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, desc1.Flags));
+                if (mHdrOutput) {
+                    // Resizing can reset the color space; put scRGB back (Dolphin does the same).
+                    Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain3;
+                    if (SUCCEEDED(swap_chain->QueryInterface(IID_PPV_ARGS(swap_chain3.GetAddressOf())))) {
+                        swap_chain3->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+                    }
+                }
             }
             ThrowIfFailed(
                 swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)tex.texture.ReleaseAndGetAddressOf()));

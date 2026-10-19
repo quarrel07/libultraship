@@ -119,6 +119,7 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     void SetSrgbMode() override;
     ImTextureID GetTextureById(int id) override;
     bool WantsGameImage() override;
+    void* PostProcessGameImage(void* gameImage) override;
 
     PFN_D3D11_CREATE_DEVICE mDX11CreateDevice;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> mContext;
@@ -133,6 +134,13 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     DXGI_FORMAT ColorFormat() const;
     void CopyIntoNewFormat(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target, uint32_t width,
                            uint32_t height);
+    bool EnsureHdrShaders();
+    void DrawFullscreen(ID3D11PixelShader* shader, ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target,
+                        uint32_t width, uint32_t height);
+    void InvalidateStateCache();
+    void SetSwapChainHdr(bool hdr);
+    void QueryDisplayHdr();
+    void ConvertBackBufferToScRgb();
 
     HMODULE mDX11Module;
 
@@ -202,6 +210,24 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     bool mHighPrecision = false;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> mFormatCopyVs;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> mFormatCopyPs;
+
+    // HDR output: while 16-bit color is on the swap chain is R16G16B16A16_FLOAT in scRGB (linear, 1.0 = 80 nits).
+    // Everything still draws in the usual display encoding; a last pass in EndFrame converts the finished frame,
+    // scaled so SDR white matches Windows' "SDR content brightness". Auto HDR may push the game image above white,
+    // capped at the display's current headroom (peak luminance / SDR white).
+    bool mHdrOutput = false;
+    bool mHdrShadersFailed = false;
+    float mSdrWhiteScale = 1.0f;
+    float mHdrHeadroom = 1.0f;
+    int mHdrPollFrames = 0;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> mAutoHdrPs;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> mScRgbPs;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> mHdrParamsCb;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> mAutoHdrTexture;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mAutoHdrSrv;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> mAutoHdrRtv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> mPresentCopy;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mPresentCopySrv;
 };
 
 std::string gfx_direct3d_common_build_shader(size_t& numFloats, const CCFeatures& cc_features,
