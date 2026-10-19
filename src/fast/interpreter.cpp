@@ -5135,6 +5135,9 @@ void Interpreter::RunGuiOnly() {
         } else {
             mGfxFrameBuffer = (uintptr_t)mRapi->GetFramebufferTextureId(mGameFb);
         }
+        if (mGfxFrameBuffer != 0) {
+            mGfxFrameBuffer = (uintptr_t)mRapi->PostProcessGameImage((void*)mGfxFrameBuffer);
+        }
     } else if (mFbActive) {
         // Failsafe reset to main framebuffer to prevent softlocking the renderer
         mFbActive = 0;
@@ -5199,6 +5202,9 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
             }
         } else {
             mGfxFrameBuffer = (uintptr_t)mRapi->GetFramebufferTextureId(mGameFb);
+        }
+        if (mGfxFrameBuffer != 0) {
+            mGfxFrameBuffer = (uintptr_t)mRapi->PostProcessGameImage((void*)mGfxFrameBuffer);
         }
     } else if (mFbActive) {
         // Failsafe reset to main framebuffer to prevent softlocking the renderer
