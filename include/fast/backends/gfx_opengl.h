@@ -109,6 +109,11 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
   private:
     void SetUniforms(ShaderProgram* prg) const;
     void ApplyColorSettings();
+
+  public:
+    bool WantsGameImage() override;
+
+  private:
     void AllocateColorBuffer(FramebufferOGL& fb, uint32_t width, uint32_t height, uint32_t msaa_level);
     std::string BuildFsShader(const CCFeatures& cc_features);
     void SetPerDrawUniforms();

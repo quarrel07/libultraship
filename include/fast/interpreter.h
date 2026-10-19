@@ -389,6 +389,7 @@ class Interpreter {
     void HandleWindowEvents();
     bool IsFrameReady();
     bool ViewportMatchesRendererResolution();
+    bool UsesSeparateGameImage();
     int GetTargetFps();
     void SetTargetFps(int fps);
     void SetMaxFrameLatency(int latency);

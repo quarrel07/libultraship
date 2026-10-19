@@ -775,6 +775,11 @@ void GfxRenderingAPIOGL::AllocateColorBuffer(FramebufferOGL& fb, uint32_t width,
     fb.highPrecision = mHighPrecision;
 }
 
+bool GfxRenderingAPIOGL::WantsGameImage() {
+    // The window stays 8-bit, so draw the game into its own 16-bit image while 16-bit color is on.
+    return mHighPrecision;
+}
+
 void GfxRenderingAPIOGL::ApplyColorSettings() {
 #ifdef USE_OPENGLES
     // Rendering to RGBA16F needs EXT_color_buffer_float on GLES; keep 8-bit there.

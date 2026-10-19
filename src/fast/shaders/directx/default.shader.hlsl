@@ -338,13 +338,13 @@ PSOutput PSMain(PSInput input, float4 screenSpace : SV_Position) {
         @if(srgb_mode)
             output.color = fromLinear(texel);
         @else
-            output.color = texel;
+            output.color = saturate(texel);
         @end
     @else
         @if(srgb_mode)
             output.color = fromLinear(float4(texel, 1.0));
         @else
-            output.color = float4(texel, 1.0);
+            output.color = float4(saturate(texel), 1.0);
         @end
     @end
     @if(o_prim_depth)

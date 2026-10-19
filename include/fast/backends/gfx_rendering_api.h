@@ -84,6 +84,11 @@ class GfxRenderingAPI {
     virtual void* PostProcessGameImage(void* gameImage) {
         return gameImage;
     }
+    // True when the game must be drawn into its own image rather than straight into the window, e.g. because
+    // the backend's game images use a different color format than the window.
+    virtual bool WantsGameImage() {
+        return false;
+    }
 
   protected:
     int8_t mCurrentDepthTest = 0;

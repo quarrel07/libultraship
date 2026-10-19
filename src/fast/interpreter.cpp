@@ -5038,6 +5038,10 @@ bool Interpreter::IsFrameReady() {
     return mWapi->IsFrameReady();
 }
 
+bool Interpreter::UsesSeparateGameImage() {
+    return !ViewportMatchesRendererResolution() || mRapi->WantsGameImage();
+}
+
 bool Interpreter::ViewportMatchesRendererResolution() {
 #ifdef __APPLE__
     // Always treat the viewport as not matching the render resolution on mac
@@ -5080,9 +5084,9 @@ void Interpreter::StartFrame() {
 
     mPrvDimensions = mCurDimensions;
     mPrevNativeDimensions = mNativeDimensions;
-    if (!ViewportMatchesRendererResolution() || mMsaaLevel > 1) {
+    if (UsesSeparateGameImage() || mMsaaLevel > 1) {
         mRendersToFb = true;
-        if (!ViewportMatchesRendererResolution()) {
+        if (UsesSeparateGameImage()) {
             mRapi->UpdateFramebufferParameters(mGameFb, mCurDimensions.width, mCurDimensions.height, mMsaaLevel, true,
                                                true, true, true);
         } else {
@@ -5091,7 +5095,7 @@ void Interpreter::StartFrame() {
             mRapi->UpdateFramebufferParameters(mGameFb, mGfxCurrentWindowDimensions.width,
                                                mGfxCurrentWindowDimensions.height, mMsaaLevel, false, true, true, true);
         }
-        if (mMsaaLevel > 1 && !ViewportMatchesRendererResolution()) {
+        if (mMsaaLevel > 1 && UsesSeparateGameImage()) {
             mRapi->UpdateFramebufferParameters(mGameFbMsaaResolved, mCurDimensions.width, mCurDimensions.height, 1,
                                                false, false, false, false);
         }
@@ -5126,7 +5130,7 @@ void Interpreter::RunGuiOnly() {
         mRapi->StartDrawToFramebuffer(0, 1);
         mRapi->ClearFramebuffer(true, true);
         if (mMsaaLevel > 1) {
-            if (!ViewportMatchesRendererResolution()) {
+            if (UsesSeparateGameImage()) {
                 mRapi->ResolveMSAAColorBuffer(mGameFbMsaaResolved, mGameFb);
                 mGfxFrameBuffer = (uintptr_t)mRapi->GetFramebufferTextureId(mGameFbMsaaResolved);
             } else {
@@ -5194,7 +5198,7 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
         mRapi->StartDrawToFramebuffer(0, 1);
         mRapi->ClearFramebuffer(true, true);
         if (mMsaaLevel > 1) {
-            if (!ViewportMatchesRendererResolution()) {
+            if (UsesSeparateGameImage()) {
                 mRapi->ResolveMSAAColorBuffer(mGameFbMsaaResolved, mGameFb);
                 mGfxFrameBuffer = (uintptr_t)mRapi->GetFramebufferTextureId(mGameFbMsaaResolved);
             } else {

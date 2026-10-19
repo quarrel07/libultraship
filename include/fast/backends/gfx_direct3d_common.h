@@ -118,6 +118,7 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     FilteringMode GetTextureFilter() override;
     void SetSrgbMode() override;
     ImTextureID GetTextureById(int id) override;
+    bool WantsGameImage() override;
 
     PFN_D3D11_CREATE_DEVICE mDX11CreateDevice;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> mContext;
@@ -128,6 +129,10 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
   private:
     void CreateDepthStencilObjects(uint32_t width, uint32_t height, uint32_t msaa_count, ID3D11DepthStencilView** view,
                                    ID3D11ShaderResourceView** srv);
+    void ApplyColorSettings();
+    DXGI_FORMAT ColorFormat() const;
+    void CopyIntoNewFormat(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target, uint32_t width,
+                           uint32_t height);
 
     HMODULE mDX11Module;
 
@@ -190,6 +195,13 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> mReadbackStaging;
     uint32_t mReadbackStagingW = 0;
     uint32_t mReadbackStagingH = 0;
+    DXGI_FORMAT mReadbackStagingFormat = DXGI_FORMAT_UNKNOWN;
+
+    // 16-bit color (gHdr.HighPrecision): game images use R16G16B16A16_FLOAT so blending and fog keep more than
+    // 8 bits of precision. The window stays 8-bit, so the game is always drawn into its own image while it is on.
+    bool mHighPrecision = false;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> mFormatCopyVs;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> mFormatCopyPs;
 };
 
 std::string gfx_direct3d_common_build_shader(size_t& numFloats, const CCFeatures& cc_features,

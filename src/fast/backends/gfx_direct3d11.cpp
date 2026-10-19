@@ -14,6 +14,7 @@
 #include <dxgi1_3.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <DirectXPackedVector.h>
 
 #ifndef _LANGUAGE_C
 #define _LANGUAGE_C
@@ -819,7 +820,117 @@ void GfxRenderingAPIDX11::OnResize() {
     // create_render_target_views(true);
 }
 
+static DXGI_FORMAT TextureFormat(ID3D11Texture2D* texture) {
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+    return desc.Format;
+}
+
+DXGI_FORMAT GfxRenderingAPIDX11::ColorFormat() const {
+    return mHighPrecision ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+}
+
+bool GfxRenderingAPIDX11::WantsGameImage() {
+    return mHighPrecision;
+}
+
+// Copies an image into a same-sized one of another color format, pixel for pixel (CopyResource needs matching
+// formats). Used when the 16-bit setting flips so persistent images such as the frozen pause background survive.
+void GfxRenderingAPIDX11::CopyIntoNewFormat(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target,
+                                            uint32_t width, uint32_t height) {
+    if (mFormatCopyVs == nullptr || mFormatCopyPs == nullptr) {
+        static const char* kSource = "Texture2D<float4> src : register(t0);\n"
+                                     "float4 VSMain(uint id : SV_VertexID) : SV_Position {\n"
+                                     "    float2 p = float2((id << 1) & 2, id & 2);\n"
+                                     "    return float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+                                     "}\n"
+                                     "float4 PSMain(float4 pos : SV_Position) : SV_Target {\n"
+                                     "    return src.Load(int3(pos.xy, 0));\n"
+                                     "}\n";
+        Microsoft::WRL::ComPtr<ID3DBlob> vs_blob, ps_blob, error_blob;
+        if (FAILED(mD3dCompile(kSource, strlen(kSource), nullptr, nullptr, nullptr, "VSMain", "vs_4_0", 0, 0,
+                               vs_blob.GetAddressOf(), error_blob.ReleaseAndGetAddressOf())) ||
+            FAILED(mD3dCompile(kSource, strlen(kSource), nullptr, nullptr, nullptr, "PSMain", "ps_4_0", 0, 0,
+                               ps_blob.GetAddressOf(), error_blob.ReleaseAndGetAddressOf())) ||
+            FAILED(mDevice->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr,
+                                               mFormatCopyVs.ReleaseAndGetAddressOf())) ||
+            FAILED(mDevice->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr,
+                                              mFormatCopyPs.ReleaseAndGetAddressOf()))) {
+            SPDLOG_ERROR("Failed to create the format copy shaders; persistent images restart blank");
+            mFormatCopyVs.Reset();
+            mFormatCopyPs.Reset();
+            return;
+        }
+    }
+
+    D3D11_VIEWPORT viewport = { 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
+    D3D11_RECT scissor = { 0, 0, (LONG)width, (LONG)height };
+    mContext->OMSetRenderTargets(1, &target, nullptr);
+    mContext->RSSetViewports(1, &viewport);
+    mContext->RSSetScissorRects(1, &scissor);
+    mContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    mContext->OMSetDepthStencilState(nullptr, 0);
+    mContext->IASetInputLayout(nullptr);
+    mContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    mContext->VSSetShader(mFormatCopyVs.Get(), nullptr, 0);
+    mContext->PSSetShader(mFormatCopyPs.Get(), nullptr, 0);
+    mContext->PSSetShaderResources(0, 1, &source);
+    mContext->Draw(3, 0);
+
+    ID3D11ShaderResourceView* no_srv = nullptr;
+    mContext->PSSetShaderResources(0, 1, &no_srv);
+}
+
+void GfxRenderingAPIDX11::ApplyColorSettings() {
+    bool high_precision =
+        !mSrgbMode && Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gHdr.HighPrecision", 0);
+    if (high_precision == mHighPrecision) {
+        return;
+    }
+    mHighPrecision = high_precision;
+
+    // Rebuild every game image in the new format, copying single-sample contents across.
+    for (int fb_id = 1; fb_id < (int)mFrameBuffers.size(); fb_id++) {
+        FramebufferDX11& fb = mFrameBuffers[fb_id];
+        TextureData& tex = mTextures[fb.texture_id];
+        if (tex.texture == nullptr) {
+            continue;
+        }
+        uint32_t width = tex.width;
+        uint32_t height = tex.height;
+        bool render_target = fb.render_target_view != nullptr;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> old_view = tex.resource_view;
+        bool keep_contents = fb.msaa_level <= 1 && render_target && old_view != nullptr;
+        // Force the rebuild: UpdateFramebufferParameters only recreates on a size or MSAA change.
+        tex.width = 0;
+        UpdateFramebufferParameters(fb_id, width, height, fb.msaa_level, false, render_target, fb.has_depth_buffer,
+                                    fb.depth_stencil_srv != nullptr);
+        if (keep_contents && fb.render_target_view != nullptr) {
+            CopyIntoNewFormat(old_view.Get(), fb.render_target_view.Get(), width, height);
+        }
+    }
+
+    // The copies changed pipeline state behind the draw-state cache; make the next draw set everything again.
+    mLastShaderProgram = nullptr;
+    mLastBlendState = nullptr;
+    mLastVertexBufferStride = 0;
+    mLastPrimitaveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    mLastDepthTest = -1;
+    mLastDepthMask = -1;
+    for (int i = 0; i < SHADER_MAX_TEXTURES; i++) {
+        mLastResourceViews[i] = nullptr;
+        mLastSamplerStates[i] = nullptr;
+    }
+    if (mCurrentFramebuffer >= 0 && mCurrentFramebuffer < (int)mFrameBuffers.size()) {
+        FramebufferDX11& current = mFrameBuffers[mCurrentFramebuffer];
+        mContext->OMSetRenderTargets(1, current.render_target_view.GetAddressOf(),
+                                     current.has_depth_buffer ? current.depth_stencil_view.Get() : nullptr);
+    }
+}
+
 void GfxRenderingAPIDX11::StartFrame() {
+    ApplyColorSettings();
+
     // Set per-frame constant buffer
     ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };
     mContext->PSSetConstantBuffers(0, 3, buffers);
@@ -870,9 +981,19 @@ void GfxRenderingAPIDX11::UpdateFramebufferParameters(int fb_id, uint32_t width,
         --msaa_level;
     }
 
-    bool diff = tex.width != width || tex.height != height || fb.msaa_level != msaa_level;
+    if (fb_id != 0 && mHighPrecision) {
+        UINT quality_levels = 0;
+        while (msaa_level > 1 && (FAILED(mDevice->CheckMultisampleQualityLevels(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                                                                 msaa_level, &quality_levels)) ||
+                                  quality_levels == 0)) {
+            --msaa_level;
+        }
+    }
 
-    if (diff || (fb.render_target_view.Get() != nullptr) != render_target) {
+    bool diff = tex.width != width || tex.height != height || fb.msaa_level != msaa_level;
+    bool format_changed = fb_id != 0 && tex.texture != nullptr && TextureFormat(tex.texture.Get()) != ColorFormat();
+
+    if (diff || format_changed || (fb.render_target_view.Get() != nullptr) != render_target) {
         if (fb_id != 0) {
             D3D11_TEXTURE2D_DESC texture_desc;
             texture_desc.Width = width;
@@ -880,7 +1001,7 @@ void GfxRenderingAPIDX11::UpdateFramebufferParameters(int fb_id, uint32_t width,
             texture_desc.Usage = D3D11_USAGE_DEFAULT;
             texture_desc.BindFlags =
                 (msaa_level <= 1 ? D3D11_BIND_SHADER_RESOURCE : 0) | (render_target ? D3D11_BIND_RENDER_TARGET : 0);
-            texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            texture_desc.Format = ColorFormat();
             texture_desc.CPUAccessFlags = 0;
             texture_desc.MiscFlags = 0;
             texture_desc.ArraySize = 1;
@@ -965,8 +1086,8 @@ void GfxRenderingAPIDX11::ResolveMSAAColorBuffer(int fb_id_target, int fb_id_sou
     FramebufferDX11& fb_dst = mFrameBuffers[fb_id_target];
     FramebufferDX11& fb_src = mFrameBuffers[fb_id_source];
 
-    mContext->ResolveSubresource(mTextures[fb_dst.texture_id].texture.Get(), 0,
-                                 mTextures[fb_src.texture_id].texture.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+    ID3D11Texture2D* source = mTextures[fb_src.texture_id].texture.Get();
+    mContext->ResolveSubresource(mTextures[fb_dst.texture_id].texture.Get(), 0, source, 0, TextureFormat(source));
 }
 
 void* GfxRenderingAPIDX11::GetFramebufferTextureId(int fb_id) {
@@ -995,7 +1116,8 @@ void GfxRenderingAPIDX11::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX
         if (fb_src.msaa_level <= 1) {
             mContext->CopyResource(td_dst.texture.Get(), td_src.texture.Get());
         } else {
-            mContext->ResolveSubresource(td_dst.texture.Get(), 0, td_src.texture.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+            mContext->ResolveSubresource(td_dst.texture.Get(), 0, td_src.texture.Get(), 0,
+                                         TextureFormat(td_src.texture.Get()));
         }
         return;
     }
@@ -1029,7 +1151,7 @@ void GfxRenderingAPIDX11::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX
         texture_desc.Height = td_src.height;
         texture_desc.Usage = D3D11_USAGE_DEFAULT;
         texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texture_desc.Format = TextureFormat(td_src.texture.Get());
         texture_desc.CPUAccessFlags = 0;
         texture_desc.MiscFlags = 0;
         texture_desc.ArraySize = 1;
@@ -1040,7 +1162,8 @@ void GfxRenderingAPIDX11::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX
         ThrowIfFailed(mDevice->CreateTexture2D(&texture_desc, nullptr, td_resolved.texture.GetAddressOf()));
 
         // Resolve multi-sample to temporary
-        mContext->ResolveSubresource(td_resolved.texture.Get(), 0, td_src.texture.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+        mContext->ResolveSubresource(td_resolved.texture.Get(), 0, td_src.texture.Get(), 0,
+                                     TextureFormat(td_src.texture.Get()));
         // Then copy the region to the destination
         mContext->CopySubresourceRegion(td_dst.texture.Get(), dstX0, dstY0, 0, 0, td_resolved.texture.Get(), 0,
                                         &region);
@@ -1060,14 +1183,15 @@ void GfxRenderingAPIDX11::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32
     td.texture->GetDesc(&srcDesc);
 
     // Reuse cached staging texture when dimensions match — avoids per-frame CreateTexture2D
-    if (!mReadbackStaging || mReadbackStagingW != srcDesc.Width || mReadbackStagingH != srcDesc.Height) {
+    if (!mReadbackStaging || mReadbackStagingW != srcDesc.Width || mReadbackStagingH != srcDesc.Height ||
+        mReadbackStagingFormat != srcDesc.Format) {
         mReadbackStaging.Reset();
 
         D3D11_TEXTURE2D_DESC texture_desc;
         texture_desc.Width = srcDesc.Width;
         texture_desc.Height = srcDesc.Height;
         texture_desc.Usage = D3D11_USAGE_STAGING;
-        texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texture_desc.Format = srcDesc.Format;
         texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         texture_desc.BindFlags = 0;
         texture_desc.MiscFlags = 0;
@@ -1079,6 +1203,7 @@ void GfxRenderingAPIDX11::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32
         ThrowIfFailed(mDevice->CreateTexture2D(&texture_desc, nullptr, mReadbackStaging.GetAddressOf()));
         mReadbackStagingW = srcDesc.Width;
         mReadbackStagingH = srcDesc.Height;
+        mReadbackStagingFormat = srcDesc.Format;
     }
 
     // Copy the framebuffer texture to the staging texture
@@ -1100,6 +1225,17 @@ void GfxRenderingAPIDX11::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32
         uint8_t* srcRow = (uint8_t*)resource.pData + srcY * resource.RowPitch;
         for (uint32_t i = 0; i < width; i++) {
             uint32_t srcX = i * srcDesc.Width / width;
+            if (srcDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+                const DirectX::PackedVector::HALF* half = (const DirectX::PackedVector::HALF*)srcRow + srcX * 4;
+                auto to5 = [](DirectX::PackedVector::HALF h) {
+                    float v = DirectX::PackedVector::XMConvertHalfToFloat(h);
+                    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                    return (uint16_t)(((uint32_t)(v * 255.0f + 0.5f) + 4) * 0x1F / 0xFF);
+                };
+                uint16_t a = DirectX::PackedVector::XMConvertHalfToFloat(half[3]) > 0.0f ? 1 : 0;
+                rgba16_buf[i + (j * width)] = (to5(half[0]) << 11) | (to5(half[1]) << 6) | (to5(half[2]) << 1) | a;
+                continue;
+            }
             uint32_t pixel = ((uint32_t*)srcRow)[srcX];
             uint8_t r = (((pixel & 0xFF) + 4) * 0x1F) / 0xFF;
             uint8_t g = ((((pixel >> 8) & 0xFF) + 4) * 0x1F) / 0xFF;
