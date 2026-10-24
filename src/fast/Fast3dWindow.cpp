@@ -106,8 +106,14 @@ void Fast3dWindow::Init() {
         width = Ship::Context::GetRawInstance()->GetConfig()->GetInt("Window.Width", 640);
         height = Ship::Context::GetRawInstance()->GetConfig()->GetInt("Window.Height", 480);
     }
+#if defined(__APPLE__) && !defined(__IOS__)
+    // macOS: Cmd+F through the Window menu instead (see useCommandFForNativeMacOSFullscreen); no second key by default.
+    constexpr int32_t defaultFullscreenScancode = -1;
+#else
+    constexpr int32_t defaultFullscreenScancode = Ship::KbScancode::LUS_KB_F11;
+#endif
     Ship::Context::GetRawInstance()->GetWindow()->SetFullscreenScancode(
-        Ship::Context::GetRawInstance()->GetConfig()->GetInt("Shortcuts.Fullscreen", Ship::KbScancode::LUS_KB_F11));
+        Ship::Context::GetRawInstance()->GetConfig()->GetInt("Shortcuts.Fullscreen", defaultFullscreenScancode));
     Ship::Context::GetRawInstance()->GetWindow()->SetMouseCaptureScancode(
         Ship::Context::GetRawInstance()->GetConfig()->GetInt("Shortcuts.MouseCapture", Ship::KbScancode::LUS_KB_F2));
 

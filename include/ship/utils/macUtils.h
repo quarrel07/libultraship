@@ -19,6 +19,11 @@ void toggleNativeMacOSFullscreen(SDL_Window* window);
 bool isNativeMacOSFullscreenActive(SDL_Window* window);
 
 /**
+ * @brief Rebinds the app menu's native full screen item to Cmd+F. Call after the SDL window exists.
+ */
+void useCommandFForNativeMacOSFullscreen(void);
+
+/**
  * @brief Checks whether the window is fully occluded (not being composited/displayed).
  * @param window Pointer to the SDL_Window to query.
  * @return true if the window is occluded, false if it is visible.

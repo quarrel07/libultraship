@@ -26,6 +26,25 @@ bool isNativeMacOSFullscreenActive(SDL_Window *window) {
     return false;
 }
 
+// Make Cmd+F the full screen shortcut: rebind the Window menu's full screen item (Ctrl+Cmd+F by default), so the
+// menu and the shortcut share one native path. The menu consumes the key, so the game never sees the F press.
+void useCommandFForNativeMacOSFullscreen(void) {
+    NSMutableArray<NSMenu *> *menus = [NSMutableArray arrayWithObject:[NSApp mainMenu] ?: [NSMenu new]];
+    while (menus.count > 0) {
+        NSMenu *menu = menus.lastObject;
+        [menus removeLastObject];
+        for (NSMenuItem *item in menu.itemArray) {
+            if (item.action == @selector(toggleFullScreen:)) {
+                item.keyEquivalent = @"f";
+                item.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+            }
+            if (item.submenu != nil) {
+                [menus addObject:item.submenu];
+            }
+        }
+    }
+}
+
 bool isWindowOccluded(SDL_Window *window) {
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);

@@ -440,6 +440,9 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     }
 #endif
     mWnd = SDL_CreateWindow(title, posX, posY, mWindowWidth, mWindowHeight, flags);
+#if defined(__APPLE__) && !defined(__IOS__)
+    useCommandFForNativeMacOSFullscreen();
+#endif
 #ifdef __EMSCRIPTEN__
     em_ui_callback_func onCanvasResize = [](int, const EmscriptenUiEvent*, void* userData) -> EM_BOOL {
         auto backend = static_cast<GfxWindowBackendSDL2*>(userData);
