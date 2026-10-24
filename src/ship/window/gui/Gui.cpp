@@ -133,6 +133,9 @@ float Gui::ComputeDpiScale() {
 }
 
 void Gui::ShutDownImGui(Ship::Window* window) {
+    if (ImGui::GetCurrentContext() == nullptr) {
+        return; // already shut down
+    }
     ImGuiWMShutdown();
     ImGuiBackendShutdown();
     ImGui::DestroyContext();

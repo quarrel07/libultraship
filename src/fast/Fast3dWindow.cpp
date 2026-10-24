@@ -63,6 +63,11 @@ Fast3dWindow::Fast3dWindow() : Fast3dWindow(std::vector<std::shared_ptr<Ship::Gu
 
 Fast3dWindow::~Fast3dWindow() {
     SPDLOG_DEBUG("destruct fast3dwindow");
+    // The Vulkan ImGui backend shuts down through the rendering API, so shut ImGui down while it still
+    // exists. ~Window's own ShutDownImGui call then finds no ImGui context and does nothing.
+    if (auto gui = GetGui()) {
+        gui->ShutDownImGui(this);
+    }
     mInterpreter->Destroy();
     delete mRenderingApi;
     delete mWindowManagerApi;
