@@ -3,11 +3,15 @@ include(FetchContent)
 #=================== SDL2 ===================
 find_package(SDL2 QUIET)
 if (NOT ${SDL2_FOUND})
+    # Apps built with the iOS 27 SDK must adopt the UIScene life cycle or UIKit stops them at launch.
+    # SDL 2 predates scenes; this patch adds them, adapted from SDL3's UIKit backend.
+    set(LUS_SDL2_UISCENE_PATCH "${CMAKE_CURRENT_LIST_DIR}/patches/sdl2-uiscene.patch")
     FetchContent_Declare(
         SDL2
         GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
         GIT_TAG release-2.32.10
         GIT_SHALLOW TRUE
+        PATCH_COMMAND sh -c "git apply --reverse --check '${LUS_SDL2_UISCENE_PATCH}' 2>/dev/null || git apply '${LUS_SDL2_UISCENE_PATCH}'"
         OVERRIDE_FIND_PACKAGE
     )
     FetchContent_MakeAvailable(SDL2)
