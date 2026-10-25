@@ -1,0 +1,204 @@
+diff --git a/src/video/uikit/SDL_uikitappdelegate.h b/src/video/uikit/SDL_uikitappdelegate.h
+index df3ff0fb..eae58a64 100644
+--- a/src/video/uikit/SDL_uikitappdelegate.h
++++ b/src/video/uikit/SDL_uikitappdelegate.h
+@@ -29,7 +29,9 @@
+ 
+ @end
+ 
+-@interface SDLUIKitDelegate : NSObject<UIApplicationDelegate>
++/* Also the UIWindowSceneDelegate: implementing application:configurationForConnectingSceneSession:
++ * opts the app into the UIScene life cycle, which apps built with the iOS 27 SDK must adopt. */
++@interface SDLUIKitDelegate : NSObject<UIApplicationDelegate, UIWindowSceneDelegate>
+ 
+ + (id)sharedAppDelegate;
+ + (NSString *)getAppDelegateClassName;
+diff --git a/src/video/uikit/SDL_uikitappdelegate.m b/src/video/uikit/SDL_uikitappdelegate.m
+index 31b114a9..7b2503dd 100644
+--- a/src/video/uikit/SDL_uikitappdelegate.m
++++ b/src/video/uikit/SDL_uikitappdelegate.m
+@@ -351,6 +351,8 @@ - (NSUInteger)supportedInterfaceOrientations
+ 
+ @implementation SDLUIKitDelegate {
+     UIWindow *launchWindow;
++    UIWindowScene *launchScene API_AVAILABLE(ios(13.0), tvos(13.0));
++    NSMutableArray<NSURL *> *launchURLs;
+ }
+ 
+ /* convenience method */
+@@ -388,11 +390,24 @@ - (void)hideLaunchScreen
+     }];
+ }
+ 
++- (UIWindow *)newLaunchWindow
++{
++    if (@available(iOS 13.0, tvOS 13.0, *)) {
++        if (launchScene) {
++            UIWindow *window = [[UIWindow alloc] initWithWindowScene:launchScene];
++            window.frame = launchScene.coordinateSpace.bounds;
++            return window;
++        }
++    }
++    return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++}
++
+ - (void)postFinishLaunch
+ {
+     /* Hide the launch screen the next time the run loop is run. SDL apps will
+      * have a chance to load resources while the launch screen is still up. */
+     [self performSelector:@selector(hideLaunchScreen) withObject:nil afterDelay:0.0];
++    [self performSelector:@selector(processLaunchURLs) withObject:nil afterDelay:0.0];
+ 
+     /* run the user's application, passing argc and argv */
+     SDL_iPhoneSetEventPump(SDL_TRUE);
+@@ -410,7 +425,7 @@ - (void)postFinishLaunch
+     /* exit(exit_status); */
+ }
+ 
+-- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
++- (void)showLaunchScreenAndRunMain
+ {
+     NSBundle *bundle = [NSBundle mainBundle];
+ 
+@@ -448,7 +463,7 @@ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(
+     }
+ 
+     if (vc.view) {
+-        launchWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        launchWindow = [self newLaunchWindow];
+ 
+         /* We don't want the launch window immediately hidden when a real SDL
+          * window is shown - we fade it out ourselves when we're ready. */
+@@ -462,6 +477,14 @@ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(
+     }
+ #endif
+ 
++    SDL_SetMainReady();
++    [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++}
++
++- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
++{
++    NSBundle *bundle = [NSBundle mainBundle];
++
+     /* Set working directory to resource path */
+     [[NSFileManager defaultManager] changeCurrentDirectoryPath:[bundle resourcePath]];
+ 
+@@ -469,12 +492,56 @@ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(
+     SDL_AddHintCallback(SDL_HINT_IDLE_TIMER_DISABLED,
+                         SDL_IdleTimerDisabledChanged, NULL);
+ 
+-    SDL_SetMainReady();
+-    [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++    if (@available(iOS 13.0, tvOS 13.0, *)) {
++        /* UIScene life cycle: this happens once the window scene connects. */
++        return YES;
++    }
++
++    [self showLaunchScreenAndRunMain];
+ 
+     return YES;
+ }
+ 
++- (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession options:(UISceneConnectionOptions *)options API_AVAILABLE(ios(13.0), tvos(13.0))
++{
++    /* Implementing this signals that the app supports the UIScene life cycle. */
++    UISceneConfiguration *config = [[UISceneConfiguration alloc] initWithName:@"SDLSceneConfiguration" sessionRole:connectingSceneSession.role];
++    config.delegateClass = [self class];
++    return config;
++}
++
++- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions API_AVAILABLE(ios(13.0), tvos(13.0))
++{
++    if (![scene isKindOfClass:[UIWindowScene class]]) {
++        return;
++    }
++
++    launchScene = (UIWindowScene *)scene;
++    launchScene.delegate = self;
++
++    launchURLs = [[NSMutableArray alloc] init];
++    for (UIOpenURLContext *context in connectionOptions.URLContexts) {
++        [launchURLs addObject:context.URL];
++    }
++
++    [self showLaunchScreenAndRunMain];
++}
++
++- (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)URLContexts API_AVAILABLE(ios(13.0), tvos(13.0))
++{
++    for (UIOpenURLContext *context in URLContexts) {
++        [self sendDropFileForURL:context.URL];
++    }
++}
++
++- (void)processLaunchURLs
++{
++    for (NSURL *url in launchURLs) {
++        [self sendDropFileForURL:url];
++    }
++    launchURLs = nil;
++}
++
+ - (UIWindow *)window
+ {
+     SDL_VideoDevice *_this = SDL_GetVideoDevice();
+diff --git a/src/video/uikit/SDL_uikitwindow.m b/src/video/uikit/SDL_uikitwindow.m
+index 0e0ea057..d582d3ec 100644
+--- a/src/video/uikit/SDL_uikitwindow.m
++++ b/src/video/uikit/SDL_uikitwindow.m
+@@ -149,6 +149,34 @@ static int SetupWindowData(_THIS, SDL_Window *window, UIWindow *uiwindow, SDL_bo
+     return 0;
+ }
+ 
++/* From SDL3: the window scene new windows should belong to. */
++static UIWindowScene *UIKit_GetActiveWindowScene(void) API_AVAILABLE(ios(13.0), tvos(13.0))
++{
++    NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
++
++    /* First, try to find an active foreground scene */
++    for (UIScene *scene in connectedScenes) {
++        if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
++            return (UIWindowScene *)scene;
++        }
++    }
++
++    /* If no active scene, return any foreground scene */
++    for (UIScene *scene in connectedScenes) {
++        if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundInactive) {
++            return (UIWindowScene *)scene;
++        }
++    }
++
++    /* Last resort: return first window scene */
++    for (UIScene *scene in connectedScenes) {
++        if ([scene isKindOfClass:[UIWindowScene class]]) {
++            return (UIWindowScene *)scene;
++        }
++    }
++    return nil;
++}
++
+ int UIKit_CreateWindow(_THIS, SDL_Window *window)
+ {
+     @autoreleasepool {
+@@ -207,7 +235,18 @@ int UIKit_CreateWindow(_THIS, SDL_Window *window)
+ 
+         /* ignore the size user requested, and make a fullscreen window */
+         /* !!! FIXME: can we have a smaller view? */
+-        uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        uiwindow = nil;
++        if (@available(iOS 13.0, tvOS 13.0, *)) {
++            /* With the UIScene life cycle, windows must belong to a window scene. */
++            UIWindowScene *scene = UIKit_GetActiveWindowScene();
++            if (scene) {
++                uiwindow = [[SDL_uikitwindow alloc] initWithWindowScene:scene];
++                uiwindow.frame = data.uiscreen.bounds;
++            }
++        }
++        if (!uiwindow) {
++            uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        }
+ 
+         /* put the window on an external display if appropriate. */
+         if (data.uiscreen != [UIScreen mainScreen]) {
